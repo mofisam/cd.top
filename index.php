@@ -14,6 +14,12 @@ $popularSearches = getPopularSearches(5);
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
   <title>checkdomain.top - Check Domain Availability Instantly</title>
+  <link rel="icon" type="image/png" href="/favicon/favicon-96x96.png" sizes="96x96" />
+  <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg" />
+  <link rel="shortcut icon" href="/favicon/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-title" content="checkdomain" />
+  <link rel="manifest" href="/favicon/site.webmanifest" />
   <meta name="description" content="Check if any domain is available for registration. Never miss your perfect domain again.">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -188,7 +194,7 @@ $popularSearches = getPopularSearches(5);
       
       <!-- Top Navigation Bar -->
       <div class="flex justify-end items-center gap-6 mb-4 text-sm">
-        <a href="#" id="contactLink" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
+        <a href="contact.php" id="contactLink" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
           <i class="fas fa-envelope text-xs"></i>
           Contact Us
         </a>
