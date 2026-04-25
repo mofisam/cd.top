@@ -532,7 +532,7 @@ function trackPageView($pageUrl) {
         // Get screen resolution from cookie if set
         $screenResolution = $_COOKIE['screen_resolution'] ?? null;
         $language = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? null;
-        $language = substr($language, 0, 2);
+        $language = substr($language ?? '', 0, 2);
         
         $stmt = $conn->prepare("INSERT INTO page_views (page_url, ip_address, user_agent, referrer, session_id, country, city, region, latitude, longitude, timezone, isp, device_type, browser_name, os_name, screen_resolution, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         
