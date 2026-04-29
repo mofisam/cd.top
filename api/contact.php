@@ -10,53 +10,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
-
-// Function to send email notification
-function sendContactNotification($to, $subject, $message, $fromName, $fromEmail) {
-    $headers = "MIME-Version: 1.0" . "\r\n";
-    $headers .= "Content-type:text/html;charset=UTF-8" . "\r\n";
-    $headers .= "From: " . $fromName . " <" . $fromEmail . ">" . "\r\n";
-    $headers .= "Reply-To: " . $fromEmail . "\r\n";
-    
-    $emailBody = "
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #1E3A8A, #10B981); color: white; padding: 20px; text-align: center; }
-            .content { padding: 20px; background: #f9f9f9; }
-            .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
-            .message-box { background: white; padding: 15px; border-left: 4px solid #3B82F6; margin: 15px 0; }
-        </style>
-    </head>
-    <body>
-        <div class='container'>
-            <div class='header'>
-                <h2>New Contact Message</h2>
-                <p>checkdomain.top</p>
-            </div>
-            <div class='content'>
-                <p><strong>Name:</strong> " . htmlspecialchars($fromName) . "</p>
-                <p><strong>Email:</strong> " . htmlspecialchars($fromEmail) . "</p>
-                <p><strong>Subject:</strong> " . htmlspecialchars($subject) . "</p>
-                <div class='message-box'>
-                    <p><strong>Message:</strong></p>
-                    <p>" . nl2br(htmlspecialchars($message)) . "</p>
-                </div>
-                <p>You can reply to this message by clicking <a href='mailto:" . htmlspecialchars($fromEmail) . "'>here</a>.</p>
-            </div>
-            <div class='footer'>
-                <p>This message was sent from the contact form on checkdomain.top</p>
-            </div>
-        </div>
-    </body>
-    </html>
-    ";
-    
-    return mail($to, $subject, $emailBody, $headers);
-}
+require_once '../includes/email.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = json_decode(file_get_contents('php://input'), true);
@@ -114,14 +68,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->bind_param("ssssss", $name, $email, $subject, $message, $ipAddress, $userAgent);
         
         if ($stmt->execute()) {
-            // Send email notification to admin (optional)
-            $adminEmail = "admin@checkdomain.top"; // Change to your admin email
-            $emailSent = sendContactNotification($adminEmail, "New Contact: " . $subject, $message, $name, $email);
+            $messageId = $stmt->insert_id;
+            
+            // Send email notification to admin via SMTP
+            $adminEmailResult = sendContactNotification($name, $email, $subject, $message);
+            
+            // Send auto-reply to user
+            $autoReplyResult = sendAutoReply($name, $email, $subject);
+            
+            $emailStatus = [];
+            if ($adminEmailResult['success']) {
+                $emailStatus[] = "Admin notified";
+            } else {
+                error_log("Admin email failed: " . ($adminEmailResult['error'] ?? 'Unknown error'));
+            }
+            
+            if ($autoReplyResult['success']) {
+                $emailStatus[] = "Auto-reply sent";
+            } else {
+                error_log("Auto-reply failed: " . ($autoReplyResult['error'] ?? 'Unknown error'));
+            }
             
             echo json_encode([
                 'success' => true,
                 'message' => 'Thank you for your message! We\'ll get back to you within 24 hours.',
-                'message_id' => $stmt->insert_id
+                'message_id' => $messageId,
+                'email_status' => implode(', ', $emailStatus)
             ]);
         } else {
             echo json_encode(['success' => false, 'errors' => ['Failed to send message. Please try again.']]);
@@ -130,7 +102,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->close();
         $conn->close();
     } catch (Exception $e) {
-        echo json_encode(['success' => false, 'errors' => ['Server error: ' . $e->getMessage()]]);
+        error_log("Contact form error: " . $e->getMessage());
+        echo json_encode(['success' => false, 'errors' => ['Server error. Please try again later.']]);
     }
 } else {
     http_response_code(405);
