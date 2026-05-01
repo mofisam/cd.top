@@ -1,5 +1,5 @@
 <?php
-require_once 'smtp.php';
+require_once '../config/smtp.php';
 
 // Load PHPMailer classes
 use PHPMailer\PHPMailer\PHPMailer;

@@ -1,7 +1,7 @@
 <?php
 require_once 'auth_check.php';
 $user = checkAdminAuth();
-require_once '../';
+require_once '../includes/email.php';
 
 $testResult = null;
 
