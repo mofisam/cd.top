@@ -82,16 +82,6 @@ $topDomains = $conn->query("
     LIMIT 10
 ");
 
-// ==================== SUBSCRIBER SOURCES ====================
-$sources = $conn->query("
-    SELECT 
-        source,
-        COUNT(*) as count
-    FROM subscribers
-    GROUP BY source
-    ORDER BY count DESC
-");
-
 // ==================== RECENT ACTIVITY ====================
 $recentSubscribers = $conn->query("
     SELECT email, name, subscribed_at, ip_address, source 
@@ -108,7 +98,7 @@ $recentActivity = $conn->query("
     LIMIT 20
 ");
 
-// ==================== HOURLY STATS (Last 24h) ====================
+// ==================== HOURLY STATS ====================
 $hourlyStats = $conn->query("
     SELECT 
         HOUR(view_date) as hour,
@@ -158,7 +148,6 @@ $browsers = $conn->query("
     GROUP BY browser
     ORDER BY count DESC
 ");
-
 $conn->close();
 ?>
 
@@ -166,289 +155,343 @@ $conn->close();
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>Analytics Dashboard - checkdomain.top</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
             background: #0F172A;
             font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
         }
+        
         .stat-card {
             background: linear-gradient(135deg, rgba(30, 58, 138, 0.3), rgba(16, 185, 129, 0.1));
             backdrop-filter: blur(10px);
             border: 1px solid rgba(59, 130, 246, 0.3);
             transition: all 0.3s ease;
         }
+        
         .stat-card:hover {
             transform: translateY(-2px);
             border-color: rgba(16, 185, 129, 0.5);
         }
-        .sidebar {
-            background: rgba(15, 23, 42, 0.95);
-            backdrop-filter: blur(10px);
-            border-right: 1px solid rgba(59, 130, 246, 0.3);
-        }
-        .nav-item {
-            transition: all 0.2s ease;
-        }
-        .nav-item:hover, .nav-item.active {
-            background: rgba(59, 130, 246, 0.2);
-            border-left: 3px solid #3B82F6;
-            padding-left: 1.5rem;
-        }
+        
         .chart-container {
             background: rgba(30, 41, 59, 0.5);
             backdrop-filter: blur(10px);
             border: 1px solid rgba(59, 130, 246, 0.2);
             border-radius: 1rem;
             padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+        
+        .chart-container:hover {
+            border-color: rgba(59, 130, 246, 0.4);
+        }
+        
+        .main-content {
+            transition: margin-left 0.3s ease;
+        }
+        
+        /* Responsive tables */
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+                gap: 1rem !important;
+            }
+            
+            .chart-container {
+                padding: 1rem;
+            }
+            
+            .chart-container h3 {
+                font-size: 1rem;
+            }
+            
+            .stat-card {
+                padding: 1rem !important;
+            }
+            
+            .stat-card p:first-child {
+                font-size: 0.7rem;
+            }
+            
+            .stat-card .text-3xl {
+                font-size: 1.5rem;
+            }
+            
+            .p-8 {
+                padding: 1rem;
+            }
+            
+            table {
+                font-size: 0.75rem;
+            }
+            
+            table td, table th {
+                padding: 0.5rem !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr !important;
+            }
+            
+            .flex.justify-between {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: stretch !important;
+            }
+            
+            .flex.gap-3 {
+                flex-wrap: wrap;
+            }
+            
+            select, button {
+                width: 100%;
+            }
+        }
+        
+        /* Loading animation */
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(59, 130, 246, 0.3);
+            border-radius: 50%;
+            border-top-color: #3B82F6;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #3B82F6;
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #60A5FA;
         }
     </style>
 </head>
 <body class="text-white">
-    <div class="flex h-screen">
-        <!-- Sidebar -->
-        <div class="sidebar w-64 fixed h-full overflow-y-auto">
-            <div class="p-6 border-b border-blue-500/30">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-green-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-chart-line text-white"></i>
+    <!-- Include Sidebar -->
+    <?php include_once 'includes/sidebar.php'; ?>
+    
+    <!-- Main Content -->
+    <div class="main-content" style="margin-left: 16rem;">
+        <div class="p-4 md:p-8">
+            <!-- Header -->
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+                <div>
+                    <h1 class="text-2xl md:text-3xl font-bold">Analytics Dashboard</h1>
+                    <p class="text-gray-400 text-sm mt-1">Welcome back, <?php echo htmlspecialchars($user['username']); ?>!</p>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                    <select id="periodSelect" class="bg-slate-800 border border-blue-500/30 rounded-lg px-4 py-2 text-sm w-full sm:w-auto">
+                        <option value="7" <?php echo $period == 7 ? 'selected' : ''; ?>>Last 7 days</option>
+                        <option value="30" <?php echo $period == 30 ? 'selected' : ''; ?>>Last 30 days</option>
+                        <option value="90" <?php echo $period == 90 ? 'selected' : ''; ?>>Last 90 days</option>
+                        <option value="365" <?php echo $period == 365 ? 'selected' : ''; ?>>Last year</option>
+                    </select>
+                    <button onclick="window.location.reload()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg transition w-full sm:w-auto">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Stats Cards -->
+            <div class="stats-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 mb-8">
+                <div class="stat-card rounded-xl p-4 md:p-6">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs md:text-sm">Total Subscribers</p>
+                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($totalSubscribers); ?></p>
+                            <p class="text-green-400 text-xs mt-2">
+                                <i class="fas fa-arrow-up"></i> +<?php echo number_format($periodStats['new_subscribers']); ?> this period
+                            </p>
+                        </div>
+                        <div class="w-10 h-10 md:w-12 md:h-12 bg-blue-500/20 rounded-full flex items-center justify-center">
+                            <i class="fas fa-users text-blue-400 text-lg md:text-xl"></i>
+                        </div>
                     </div>
-                    <div>
-                        <h2 class="font-bold text-lg">checkdomain</h2>
-                        <p class="text-xs text-gray-400">Admin Panel</p>
+                </div>
+                
+                <div class="stat-card rounded-xl p-4 md:p-6">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs md:text-sm">Total Page Views</p>
+                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($totalPageViews); ?></p>
+                            <p class="text-blue-400 text-xs mt-2">
+                                <i class="fas fa-chart-line"></i> <?php echo number_format($periodStats['period_views']); ?> this period
+                            </p>
+                        </div>
+                        <div class="w-10 h-10 md:w-12 md:h-12 bg-green-500/20 rounded-full flex items-center justify-center">
+                            <i class="fas fa-eye text-green-400 text-lg md:text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="stat-card rounded-xl p-4 md:p-6">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs md:text-sm">Unique Visitors</p>
+                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($totalUniqueVisitors); ?></p>
+                            <p class="text-purple-400 text-xs mt-2">
+                                <i class="fas fa-users"></i> <?php echo number_format($periodStats['period_visitors']); ?> unique
+                            </p>
+                        </div>
+                        <div class="w-10 h-10 md:w-12 md:h-12 bg-purple-500/20 rounded-full flex items-center justify-center">
+                            <i class="fas fa-user-friends text-purple-400 text-lg md:text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="stat-card rounded-xl p-4 md:p-6">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs md:text-sm">Pinned Domains</p>
+                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($totalPinnedDomains); ?></p>
+                            <p class="text-orange-400 text-xs mt-2">
+                                <i class="fas fa-thumbtack"></i> <?php echo number_format($periodStats['period_pins']); ?> new
+                            </p>
+                        </div>
+                        <div class="w-10 h-10 md:w-12 md:h-12 bg-orange-500/20 rounded-full flex items-center justify-center">
+                            <i class="fas fa-thumbtack text-orange-400 text-lg md:text-xl"></i>
+                        </div>
                     </div>
                 </div>
             </div>
             
-            <nav class="p-4">
-                <div class="space-y-2">
-                    <a href="stats.php" class="nav-item active flex items-center gap-3 px-4 py-3 rounded-lg text-gray-300 hover:text-white transition">
-                        <i class="fas fa-tachometer-alt w-5"></i>
-                        <span>Dashboard</span>
-                    </a>
-                    <a href="subscribers.php" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-gray-300 hover:text-white transition">
-                        <i class="fas fa-users w-5"></i>
-                        <span>Subscribers</span>
-                    </a>
-                    <a href="domains.php" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-gray-300 hover:text-white transition">
-                        <i class="fas fa-thumbtack w-5"></i>
-                        <span>Pinned Domains</span>
-                    </a>
-                    <a href="activity.php" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-gray-300 hover:text-white transition">
-                        <i class="fas fa-history w-5"></i>
-                        <span>Activity Log</span>
-                    </a>
-                    <a href="settings.php" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-gray-300 hover:text-white transition">
-                        <i class="fas fa-cog w-5"></i>
-                        <span>Settings</span>
-                    </a>
-                </div>
-                
-                <div class="mt-8 pt-8 border-t border-gray-700">
-                    <a href="logout.php" class="flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-red-500/10 transition">
-                        <i class="fas fa-sign-out-alt w-5"></i>
-                        <span>Logout</span>
-                    </a>
-                </div>
-            </nav>
-        </div>
-        
-        <!-- Main Content -->
-        <div class="flex-1 ml-64 overflow-y-auto">
-            <div class="p-8">
-                <!-- Header -->
-                <div class="flex justify-between items-center mb-8">
-                    <div>
-                        <h1 class="text-3xl font-bold">Analytics Dashboard</h1>
-                        <p class="text-gray-400 mt-1">Welcome back, <?php echo htmlspecialchars($user['username']); ?>!</p>
-                    </div>
-                    <div class="flex gap-3">
-                        <select id="periodSelect" class="bg-slate-800 border border-blue-500/30 rounded-lg px-4 py-2 text-sm">
-                            <option value="7" <?php echo $period == 7 ? 'selected' : ''; ?>>Last 7 days</option>
-                            <option value="30" <?php echo $period == 30 ? 'selected' : ''; ?>>Last 30 days</option>
-                            <option value="90" <?php echo $period == 90 ? 'selected' : ''; ?>>Last 90 days</option>
-                            <option value="365" <?php echo $period == 365 ? 'selected' : ''; ?>>Last year</option>
-                        </select>
-                        <button onclick="window.location.reload()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg transition">
-                            <i class="fas fa-sync-alt"></i> Refresh
-                        </button>
-                    </div>
-                </div>
-                
-                <!-- Stats Cards -->
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                    <div class="stat-card rounded-xl p-6">
-                        <div class="flex justify-between items-start">
-                            <div>
-                                <p class="text-gray-400 text-sm">Total Subscribers</p>
-                                <p class="text-3xl font-bold mt-2"><?php echo number_format($totalSubscribers); ?></p>
-                                <p class="text-green-400 text-xs mt-2">
-                                    <i class="fas fa-arrow-up"></i> +<?php echo number_format($periodStats['new_subscribers']); ?> this period
-                                </p>
-                            </div>
-                            <div class="w-12 h-12 bg-blue-500/20 rounded-full flex items-center justify-center">
-                                <i class="fas fa-users text-blue-400 text-xl"></i>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="stat-card rounded-xl p-6">
-                        <div class="flex justify-between items-start">
-                            <div>
-                                <p class="text-gray-400 text-sm">Total Page Views</p>
-                                <p class="text-3xl font-bold mt-2"><?php echo number_format($totalPageViews); ?></p>
-                                <p class="text-blue-400 text-xs mt-2">
-                                    <i class="fas fa-chart-line"></i> <?php echo number_format($periodStats['period_views']); ?> this period
-                                </p>
-                            </div>
-                            <div class="w-12 h-12 bg-green-500/20 rounded-full flex items-center justify-center">
-                                <i class="fas fa-eye text-green-400 text-xl"></i>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="stat-card rounded-xl p-6">
-                        <div class="flex justify-between items-start">
-                            <div>
-                                <p class="text-gray-400 text-sm">Unique Visitors</p>
-                                <p class="text-3xl font-bold mt-2"><?php echo number_format($totalUniqueVisitors); ?></p>
-                                <p class="text-purple-400 text-xs mt-2">
-                                    <i class="fas fa-users"></i> <?php echo number_format($periodStats['period_visitors']); ?> unique this period
-                                </p>
-                            </div>
-                            <div class="w-12 h-12 bg-purple-500/20 rounded-full flex items-center justify-center">
-                                <i class="fas fa-user-friends text-purple-400 text-xl"></i>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="stat-card rounded-xl p-6">
-                        <div class="flex justify-between items-start">
-                            <div>
-                                <p class="text-gray-400 text-sm">Pinned Domains</p>
-                                <p class="text-3xl font-bold mt-2"><?php echo number_format($totalPinnedDomains); ?></p>
-                                <p class="text-orange-400 text-xs mt-2">
-                                    <i class="fas fa-thumbtack"></i> <?php echo number_format($periodStats['period_pins']); ?> new pins
-                                </p>
-                            </div>
-                            <div class="w-12 h-12 bg-orange-500/20 rounded-full flex items-center justify-center">
-                                <i class="fas fa-thumbtack text-orange-400 text-xl"></i>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Charts Row 1 -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">Subscriber Growth</h3>
-                        <canvas id="growthChart"></canvas>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">Page Views vs Unique Visitors</h3>
-                        <canvas id="viewsChart"></canvas>
-                    </div>
-                </div>
-                
-                <!-- Charts Row 2 -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">24-Hour Traffic Pattern</h3>
-                        <canvas id="hourlyChart"></canvas>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">Top Pinned Domains</h3>
-                        <canvas id="topDomainsChart"></canvas>
-                    </div>
-                </div>
-                
-                <!-- Charts Row 3 -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">Device Distribution</h3>
-                        <canvas id="deviceChart"></canvas>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <h3 class="text-lg font-semibold mb-4">Browser Distribution</h3>
-                        <canvas id="browserChart"></canvas>
-                    </div>
-                </div>
-                
-                <!-- Recent Subscribers -->
-                <div class="chart-container mb-8">
-                    <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-lg font-semibold">Recent Subscribers</h3>
-                        <a href="subscribers.php" class="text-blue-400 text-sm hover:underline">View All →</a>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-sm">
-                            <thead class="border-b border-gray-700">
-                                <tr>
-                                    <th class="text-left py-3">Email</th>
-                                    <th class="text-left py-3">Name</th>
-                                    <th class="text-left py-3">Subscribed At</th>
-                                    <th class="text-left py-3">Source</th>
-                                    <th class="text-left py-3">IP Address</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php while($row = $recentSubscribers->fetch_assoc()): ?>
-                                <tr class="border-b border-gray-800">
-                                    <td class="py-2"><?php echo htmlspecialchars($row['email']); ?></td>
-                                    <td class="py-2"><?php echo htmlspecialchars($row['name'] ?: '—'); ?></td>
-                                    <td class="py-2"><?php echo date('M d, Y H:i', strtotime($row['subscribed_at'])); ?></td>
-                                    <td class="py-2"><?php echo htmlspecialchars($row['source']); ?></td>
-                                    <td class="py-2 font-mono text-xs"><?php echo $row['ip_address']; ?></td>
-                                </tr>
-                                <?php endwhile; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                
-                <!-- Recent Admin Activity -->
+            <!-- Charts Row 1 -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-8">
                 <div class="chart-container">
-                    <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-lg font-semibold">Recent Admin Activity</h3>
-                        <a href="activity.php" class="text-blue-400 text-sm hover:underline">View All →</a>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-sm">
-                            <thead class="border-b border-gray-700">
-                                <tr>
-                                    <th class="text-left py-3">Admin</th>
-                                    <th class="text-left py-3">Action</th>
-                                    <th class="text-left py-3">Details</th>
-                                    <th class="text-left py-3">Time</th>
-                                    <th class="text-left py-3">IP Address</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php while($row = $recentActivity->fetch_assoc()): ?>
-                                <tr class="border-b border-gray-800">
-                                    <td class="py-2"><?php echo htmlspecialchars($row['username'] ?? 'System'); ?></td>
-                                    <td class="py-2">
-                                        <span class="px-2 py-1 bg-blue-500/20 rounded-full text-xs">
-                                            <?php echo htmlspecialchars($row['action']); ?>
-                                        </span>
-                                    </td>
-                                    <td class="py-2"><?php echo htmlspecialchars($row['details'] ?? '—'); ?></td>
-                                    <td class="py-2"><?php echo date('M d, Y H:i', strtotime($row['created_at'])); ?></td>
-                                    <td class="py-2 font-mono text-xs"><?php echo $row['ip_address']; ?></td>
-                                </tr>
-                                <?php endwhile; ?>
-                            </tbody>
-                        </table>
-                    </div>
+                    <h3 class="text-base md:text-lg font-semibold mb-4">Subscriber Growth</h3>
+                    <canvas id="growthChart" style="max-height: 300px;"></canvas>
+                </div>
+                
+                <div class="chart-container">
+                    <h3 class="text-base md:text-lg font-semibold mb-4">Page Views vs Unique Visitors</h3>
+                    <canvas id="viewsChart" style="max-height: 300px;"></canvas>
+                </div>
+            </div>
+            
+            <!-- Charts Row 2 -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-8">
+                <div class="chart-container">
+                    <h3 class="text-base md:text-lg font-semibold mb-4">24-Hour Traffic Pattern</h3>
+                    <canvas id="hourlyChart" style="max-height: 300px;"></canvas>
+                </div>
+                
+                <div class="chart-container">
+                    <h3 class="text-base md:text-lg font-semibold mb-4">Top Pinned Domains</h3>
+                    <canvas id="topDomainsChart" style="max-height: 300px;"></canvas>
+                </div>
+            </div>
+            
+            <!-- Charts Row 3 -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-8">
+                <div class="chart-container">
+                    <h3 class="text-base md:text-lg font-semibold mb-4">Device Distribution</h3>
+                    <canvas id="deviceChart" style="max-height: 250px;"></canvas>
+                </div>
+                
+                <div class="chart-container">
+                    <h3 class="text-base md:text-lg font-semibold mb-4">Browser Distribution</h3>
+                    <canvas id="browserChart" style="max-height: 250px;"></canvas>
+                </div>
+            </div>
+            
+            <!-- Recent Subscribers -->
+            <div class="chart-container mb-8">
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
+                    <h3 class="text-base md:text-lg font-semibold">Recent Subscribers</h3>
+                    <a href="subscribers.php" class="text-blue-400 text-sm hover:underline">View All →</a>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs md:text-sm">
+                        <thead class="border-b border-gray-700">
+                            <tr>
+                                <th class="text-left py-3">Email</th>
+                                <th class="text-left py-3">Name</th>
+                                <th class="text-left py-3">Subscribed At</th>
+                                <th class="text-left py-3 hidden md:table-cell">Source</th>
+                                <th class="text-left py-3 hidden lg:table-cell">IP Address</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php while($row = $recentSubscribers->fetch_assoc()): ?>
+                            <tr class="border-b border-gray-800">
+                                <td class="py-2"><?php echo htmlspecialchars(substr($row['email'], 0, 20) . (strlen($row['email']) > 20 ? '...' : '')); ?></td>
+                                <td class="py-2"><?php echo htmlspecialchars($row['name'] ?: '—'); ?></td>
+                                <td class="py-2 whitespace-nowrap"><?php echo date('M d, H:i', strtotime($row['subscribed_at'])); ?></td>
+                                <td class="py-2 hidden md:table-cell"><?php echo htmlspecialchars($row['source']); ?></td>
+                                <td class="py-2 hidden lg:table-cell font-mono text-xs"><?php echo $row['ip_address']; ?></td>
+                            </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Recent Admin Activity -->
+            <div class="chart-container">
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
+                    <h3 class="text-base md:text-lg font-semibold">Recent Admin Activity</h3>
+                    <a href="activity.php" class="text-blue-400 text-sm hover:underline">View All →</a>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs md:text-sm">
+                        <thead class="border-b border-gray-700">
+                            <tr>
+                                <th class="text-left py-3">Admin</th>
+                                <th class="text-left py-3">Action</th>
+                                <th class="text-left py-3 hidden lg:table-cell">Details</th>
+                                <th class="text-left py-3">Time</th>
+                                <th class="text-left py-3 hidden xl:table-cell">IP Address</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php while($row = $recentActivity->fetch_assoc()): ?>
+                            <tr class="border-b border-gray-800">
+                                <td class="py-2"><?php echo htmlspecialchars($row['username'] ?? 'System'); ?></td>
+                                <td class="py-2">
+                                    <span class="px-2 py-1 bg-blue-500/20 rounded-full text-xs whitespace-nowrap">
+                                        <?php echo htmlspecialchars($row['action']); ?>
+                                    </span>
+                                 </td>
+                                <td class="py-2 hidden lg:table-cell"><?php echo htmlspecialchars(substr($row['details'] ?? '—', 0, 30)); ?></td>
+                                <td class="py-2 whitespace-nowrap"><?php echo date('M d, H:i', strtotime($row['created_at'])); ?></td>
+                                <td class="py-2 hidden xl:table-cell font-mono text-xs"><?php echo $row['ip_address']; ?></td>
+                            </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -475,8 +518,8 @@ $conn->close();
                     fill: true,
                     pointBackgroundColor: '#10B981',
                     pointBorderColor: '#fff',
-                    pointRadius: 4,
-                    pointHoverRadius: 6
+                    pointRadius: 3,
+                    pointHoverRadius: 5
                 }]
             },
             options: {
@@ -484,16 +527,16 @@ $conn->close();
                 maintainAspectRatio: true,
                 plugins: {
                     legend: {
-                        labels: { color: '#fff' }
+                        labels: { color: '#fff', font: { size: 11 } }
                     }
                 },
                 scales: {
                     y: {
-                        ticks: { color: '#fff', stepSize: 1 },
+                        ticks: { color: '#fff', stepSize: 1, font: { size: 10 } },
                         grid: { color: '#374151' }
                     },
                     x: {
-                        ticks: { color: '#fff', maxRotation: 45 },
+                        ticks: { color: '#fff', maxRotation: 45, font: { size: 10 } },
                         grid: { color: '#374151' }
                     }
                 }
@@ -514,7 +557,8 @@ $conn->close();
                         backgroundColor: 'rgba(59, 130, 246, 0.1)',
                         tension: 0.4,
                         fill: true,
-                        pointBackgroundColor: '#3B82F6'
+                        pointBackgroundColor: '#3B82F6',
+                        pointRadius: 3
                     },
                     {
                         label: 'Unique Visitors',
@@ -523,7 +567,8 @@ $conn->close();
                         backgroundColor: 'rgba(139, 92, 246, 0.1)',
                         tension: 0.4,
                         fill: true,
-                        pointBackgroundColor: '#8B5CF6'
+                        pointBackgroundColor: '#8B5CF6',
+                        pointRadius: 3
                     }
                 ]
             },
@@ -532,16 +577,16 @@ $conn->close();
                 maintainAspectRatio: true,
                 plugins: {
                     legend: {
-                        labels: { color: '#fff' }
+                        labels: { color: '#fff', font: { size: 11 } }
                     }
                 },
                 scales: {
                     y: {
-                        ticks: { color: '#fff', stepSize: 1 },
+                        ticks: { color: '#fff', stepSize: 1, font: { size: 10 } },
                         grid: { color: '#374151' }
                     },
                     x: {
-                        ticks: { color: '#fff', maxRotation: 45 },
+                        ticks: { color: '#fff', maxRotation: 45, font: { size: 10 } },
                         grid: { color: '#374151' }
                     }
                 }
@@ -558,7 +603,7 @@ $conn->close();
                     label: 'Page Views',
                     data: <?php echo json_encode(array_values($hourlyViews)); ?>,
                     backgroundColor: '#10B981',
-                    borderRadius: 8,
+                    borderRadius: 6,
                     barPercentage: 0.8
                 }]
             },
@@ -567,7 +612,7 @@ $conn->close();
                 maintainAspectRatio: true,
                 plugins: {
                     legend: {
-                        labels: { color: '#fff' }
+                        labels: { color: '#fff', font: { size: 11 } }
                     },
                     tooltip: {
                         callbacks: {
@@ -579,22 +624,12 @@ $conn->close();
                 },
                 scales: {
                     y: {
-                        ticks: { color: '#fff', stepSize: 1 },
-                        grid: { color: '#374151' },
-                        title: {
-                            display: true,
-                            text: 'Number of Views',
-                            color: '#9CA3AF'
-                        }
+                        ticks: { color: '#fff', stepSize: 1, font: { size: 10 } },
+                        grid: { color: '#374151' }
                     },
                     x: {
-                        ticks: { color: '#fff' },
-                        grid: { color: '#374151' },
-                        title: {
-                            display: true,
-                            text: 'Hour of Day (24h format)',
-                            color: '#9CA3AF'
-                        }
+                        ticks: { color: '#fff', font: { size: 10 } },
+                        grid: { color: '#374151' }
                     }
                 }
             }
@@ -620,26 +655,26 @@ $conn->close();
                     label: 'Times Pinned',
                     data: topDomainsData.data,
                     backgroundColor: '#F59E0B',
-                    borderRadius: 8,
+                    borderRadius: 6,
                     barPercentage: 0.8
                 }]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: true,
-                indexAxis: 'y',
+                indexAxis: window.innerWidth < 768 ? 'x' : 'y',
                 plugins: {
                     legend: {
-                        labels: { color: '#fff' }
+                        labels: { color: '#fff', font: { size: 11 } }
                     }
                 },
                 scales: {
                     y: {
-                        ticks: { color: '#fff' },
+                        ticks: { color: '#fff', font: { size: 10 } },
                         grid: { color: '#374151' }
                     },
                     x: {
-                        ticks: { color: '#fff', stepSize: 1 },
+                        ticks: { color: '#fff', stepSize: 1, font: { size: 10 } },
                         grid: { color: '#374151' }
                     }
                 }
@@ -673,7 +708,7 @@ $conn->close();
                 maintainAspectRatio: true,
                 plugins: {
                     legend: {
-                        labels: { color: '#fff', position: 'bottom' }
+                        labels: { color: '#fff', font: { size: 11 }, position: 'bottom' }
                     }
                 }
             }
@@ -706,10 +741,20 @@ $conn->close();
                 maintainAspectRatio: true,
                 plugins: {
                     legend: {
-                        labels: { color: '#fff', position: 'bottom' }
+                        labels: { color: '#fff', font: { size: 11 }, position: 'bottom' }
                     }
                 }
             }
+        });
+        
+        // Adjust chart orientation on window resize
+        window.addEventListener('resize', function() {
+            if (window.innerWidth < 768) {
+                domainsCtx.canvas.chart.config.options.indexAxis = 'x';
+            } else {
+                domainsCtx.canvas.chart.config.options.indexAxis = 'y';
+            }
+            domainsCtx.canvas.chart.update();
         });
     </script>
 </body>
