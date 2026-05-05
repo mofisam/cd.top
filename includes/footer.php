@@ -16,7 +16,7 @@ if (!isset($assetUrl)) {
           <i class="fas fa-envelope mr-1 text-green-400"></i> Contact Us
         </a>
         <a href="<?php echo htmlspecialchars($assetUrl('admin/login.php'), ENT_QUOTES, 'UTF-8'); ?>" id="loginLinkFooter" class="hover:text-blue-400 transition flex items-center gap-1">
-          <i class="fas fa-sign-in-alt mr-1 text-green-400"></i> Admin Login
+          <i class="fas fa-sign-in-alt mr-1 text-green-400"></i> Login
         </a>
       </div>
     </div>

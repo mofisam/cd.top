@@ -217,7 +217,7 @@ $assetUrl = $assetUrl ?? function ($path) use ($appBasePath) {
           <img src="<?php echo htmlspecialchars($assetUrl('images/logo.png'), ENT_QUOTES, 'UTF-8'); ?>" alt="checkdomain.top logo" class="h-10 w-10 object-contain">
           <div>
             <div class="text-lg font-extrabold tracking-tight">checkdomain<span class="text-green-400">.</span>top</div>
-            <div class="text-[11px] font-mono text-sky-200/75">Domain availability intelligence</div>
+            <div class="text-[11px] font-mono text-sky-200/75">Never miss the perfect domain again</div>
           </div>
         </a>
         <div class="flex items-center gap-5 text-sm">
