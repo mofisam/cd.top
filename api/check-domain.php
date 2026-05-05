@@ -10,6 +10,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require_once '../config/database.php';
+require_once '../includes/rate_limiter.php';
+
 // Enable error reporting for debugging (remove in production)
 error_reporting(E_ALL);
 ini_set('display_errors', 0); // Don't display errors, log them
@@ -162,18 +169,42 @@ function checkWithAPI($domain) {
 // Main handler
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) {
+        $input = [];
+    }
+
     $domain = trim($input['domain'] ?? '');
+    $captchaAnswer = trim($input['captcha'] ?? '');
     
-    if (empty($domain)) {
+    $validation = validateDomain($domain);
+    if (!$validation['valid']) {
         http_response_code(400);
-        echo json_encode(['error' => 'Domain name is required']);
+        echo json_encode(['success' => false, 'error' => $validation['error']]);
         exit();
     }
-    
-    // Validate domain
-    if (!preg_match('/^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/', $domain)) {
-        http_response_code(400);
-        echo json_encode(['error' => 'Invalid domain format']);
+
+    $domain = $validation['domain'];
+    $rateLimit = checkDomainRateLimit(getClientIP(), $captchaAnswer);
+
+    if (!$rateLimit['allowed']) {
+        http_response_code(429);
+
+        if (($rateLimit['reason'] ?? '') === 'captcha_required') {
+            echo json_encode([
+                'success' => false,
+                'requiresCaptcha' => true,
+                'captcha' => $rateLimit['captcha'],
+                'message' => $rateLimit['message']
+            ]);
+            exit();
+        }
+
+        header('Retry-After: ' . (int) ($rateLimit['retryAfter'] ?? 60));
+        echo json_encode([
+            'success' => false,
+            'error' => $rateLimit['message'] ?? 'Too many requests. Please try again later.',
+            'retryAfter' => $rateLimit['retryAfter'] ?? null
+        ]);
         exit();
     }
     
@@ -184,6 +215,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$result) {
         $result = simpleWhoisLookup($domain);
     }
+
+    $result['success'] = true;
     
     echo json_encode($result);
 } else {
