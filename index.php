@@ -15,7 +15,7 @@ require_once 'includes/header.php';
         <div class="flex flex-col gap-4 text-left md:flex-row md:items-center md:justify-between">
           <div class="flex items-center gap-4">
             <div class="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-200">
-              <i class="fas fa-magnifying-glass-chart text-xl"></i>
+              <img src="<?php echo htmlspecialchars($assetUrl('images/logo.png'), ENT_QUOTES, 'UTF-8'); ?>" alt="checkdomain.top logo" class="h-10 w-10 object-contain">
             </div>
             <div>
               <h2 class="text-2xl font-semibold text-white">Search domain availability</h2>
@@ -267,7 +267,7 @@ require_once 'includes/header.php';
     }
     
     async function checkDomainAPI(domain, captchaAnswer = '') {
-      const response = await fetch(appUrl('api/check-domain.php'), {
+      const response = await fetch(appUrl('api/checkingdomain.php'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain: domain, captcha: captchaAnswer })
