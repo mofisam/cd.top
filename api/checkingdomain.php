@@ -29,17 +29,10 @@ define('WHOIS_API_KEY', 'at_Tum0rTrVQkxRo3NjRDgRxeWiJwXTN');
 // ============================================
 
 /**
- * Primary lookup via WhoisXML API (HTTPS — works on all hosts including Truehost).
- * Port 43 raw WHOIS was removed because shared hosts block outbound port 43.
+ * Make a cURL GET request and return the decoded JSON body.
+ * Returns null on any network or HTTP error.
  */
-function checkWithAPI($domain) {
-    $url = "https://www.whoisxmlapi.com/whoisserver/WhoisService";
-    $params = [
-        'apiKey'       => WHOIS_API_KEY,
-        'domainName'   => $domain,
-        'outputFormat' => 'JSON',
-    ];
-
+function apiGet($url, array $params) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL,            $url . '?' . http_build_query($params));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -54,62 +47,97 @@ function checkWithAPI($domain) {
     curl_close($ch);
 
     if ($curlError) {
-        error_log("WhoisXML cURL error for $domain: $curlError");
+        error_log("cURL error [$url]: $curlError");
         return null;
     }
-
     if ($httpCode !== 200) {
-        error_log("WhoisXML HTTP $httpCode for $domain");
+        error_log("HTTP $httpCode [$url]: " . substr($response, 0, 300));
         return null;
     }
 
     $data = json_decode($response, true);
-
-    if (!$data || !isset($data['WhoisRecord'])) {
-        error_log("WhoisXML unexpected response for $domain: " . substr($response, 0, 200));
+    if (!is_array($data)) {
+        error_log("Non-JSON response [$url]: " . substr($response, 0, 300));
         return null;
     }
 
-    $record = $data['WhoisRecord'];
+    return $data;
+}
 
-    // Domain not found = available
-    if (
-        (isset($record['dataError']) && $record['dataError'] === 'Not found') ||
-        (isset($record['registryData']['dataError']) && $record['registryData']['dataError'] === 'Not found')
-    ) {
-        return ['available' => true, 'domain' => $domain];
+/**
+ * STEP 1 — Check availability using the dedicated Availability API.
+ * Returns 'available', 'taken', or null (on failure).
+ *
+ * Endpoint docs: https://domain-availability.whoisxmlapi.com/api/v1
+ */
+function checkAvailability($domain) {
+    $data = apiGet('https://domain-availability.whoisxmlapi.com/api/v1', [
+        'apiKey'       => WHOIS_API_KEY,
+        'domainName'   => $domain,
+        'credits'      => 'DA',          // use Domain Availability credits
+    ]);
+
+    if (!$data) return null;
+
+    // Response contains domainAvailability: "AVAILABLE" or "UNAVAILABLE"
+    $status = strtoupper($data['DomainInfo']['domainAvailability'] ?? '');
+
+    if ($status === 'AVAILABLE')   return 'available';
+    if ($status === 'UNAVAILABLE') return 'taken';
+
+    error_log("Availability API unexpected status for $domain: " . json_encode($data));
+    return null;
+}
+
+/**
+ * STEP 2 — Fetch full WHOIS details (only called when domain is TAKEN).
+ * Returns registrar, creationDate, expiryDate.
+ */
+function fetchWhoisDetails($domain) {
+    $data = apiGet('https://www.whoisxmlapi.com/whoisserver/WhoisService', [
+        'apiKey'       => WHOIS_API_KEY,
+        'domainName'   => $domain,
+        'outputFormat' => 'JSON',
+    ]);
+
+    if (!$data || !isset($data['WhoisRecord'])) {
+        return [
+            'registrar'    => 'Unknown',
+            'creationDate' => 'Unknown',
+            'expiryDate'   => 'Unknown',
+        ];
     }
 
-    // Has a registrar name = taken
-    $registrar    = $record['registrarName']           ?? ($record['registryData']['registrarName'] ?? 'Unknown');
-    $creationDate = $record['createdDateNormalized']   ?? ($record['registryData']['createdDateNormalized'] ?? 'Unknown');
-    $expiryDate   = $record['expiresDateNormalized']   ?? ($record['registryData']['expiresDateNormalized'] ?? 'Unknown');
+    $r = $data['WhoisRecord'];
+    $rd = $r['registryData'] ?? [];
 
-    // Extra fallback field names some TLDs return
-    if ($creationDate === 'Unknown' && isset($record['registryData']['createdDate'])) {
-        $creationDate = $record['registryData']['createdDate'];
-    }
-    if ($expiryDate === 'Unknown' && isset($record['registryData']['expiresDate'])) {
-        $expiryDate = $record['registryData']['expiresDate'];
+    $registrar    = $r['registrarName']         ?? ($rd['registrarName']         ?? '');
+    $creationDate = $r['createdDateNormalized']  ?? ($rd['createdDateNormalized']  ?? '');
+    $expiryDate   = $r['expiresDateNormalized']  ?? ($rd['expiresDateNormalized']  ?? '');
+
+    // Some TLDs use slightly different field names
+    if (!$creationDate) $creationDate = $r['createdDate']  ?? ($rd['createdDate']  ?? '');
+    if (!$expiryDate)   $expiryDate   = $r['expiresDate']  ?? ($rd['expiresDate']  ?? '');
+
+    // Parse nameservers if present
+    $nameservers = [];
+    if (!empty($r['nameServers']['hostNames'])) {
+        $nameservers = array_slice($r['nameServers']['hostNames'], 0, 4);
     }
 
     return [
-        'available'    => false,
-        'domain'       => $domain,
         'registrar'    => $registrar    ?: 'Unknown',
         'creationDate' => $creationDate ?: 'Unknown',
         'expiryDate'   => $expiryDate   ?: 'Unknown',
+        'nameservers'  => $nameservers,
     ];
 }
 
 /**
- * Hardcoded fallback for very well-known domains.
- * Only used when the API call fails entirely (e.g. network issue or quota exceeded).
- * Returns null for anything not in the list so the caller can surface a proper error.
+ * Hardcoded fallback — only used if BOTH API calls fail completely.
+ * Returns null for anything not in the list so the caller surfaces a real error.
  */
 function hardcodedFallback($domain) {
-    $domain = strtolower(trim($domain));
-
     $takenDomains = [
         'google.com', 'facebook.com', 'amazon.com', 'microsoft.com', 'apple.com',
         'netflix.com', 'openai.com', 'github.com', 'twitter.com', 'instagram.com',
@@ -117,17 +145,17 @@ function hardcodedFallback($domain) {
         'checkdomain.top', 'yahoo.com', 'bing.com', 'duckduckgo.com', 'reddit.com',
     ];
 
-    if (in_array($domain, $takenDomains)) {
+    if (in_array(strtolower($domain), $takenDomains)) {
         return [
             'available'    => false,
             'domain'       => $domain,
-            'registrar'    => 'MarkMonitor Inc.',
+            'registrar'    => 'Unknown',
             'creationDate' => 'Unknown',
             'expiryDate'   => 'Unknown',
         ];
     }
 
-    return null; // Unknown — don't guess
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,11 +164,9 @@ function hardcodedFallback($domain) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $input = json_decode(file_get_contents('php://input'), true);
-    if (!is_array($input)) {
-        $input = [];
-    }
+    if (!is_array($input)) $input = [];
 
-    $domain       = trim($input['domain']  ?? '');
+    $domain        = trim($input['domain']  ?? '');
     $captchaAnswer = trim($input['captcha'] ?? '');
 
     // Validate domain format
@@ -161,10 +187,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (($rateLimit['reason'] ?? '') === 'captcha_required') {
             echo json_encode([
-                'success'        => false,
+                'success'         => false,
                 'requiresCaptcha' => true,
-                'captcha'        => $rateLimit['captcha'],
-                'message'        => $rateLimit['message'],
+                'captcha'         => $rateLimit['captcha'],
+                'message'         => $rateLimit['message'],
             ]);
             exit();
         }
@@ -178,26 +204,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit();
     }
 
-    // 1. Try WhoisXML API (HTTPS — works on shared hosting)
-    $result = checkWithAPI($domain);
+    // ------------------------------------------------------------------
+    // 1. Check availability first (dedicated API — unambiguous result)
+    // ------------------------------------------------------------------
+    $availability = checkAvailability($domain);
 
-    // 2. Fallback: hardcoded well-known domains
-    if ($result === null) {
-        $result = hardcodedFallback($domain);
-    }
-
-    // 3. Both failed — surface a real error instead of a wrong answer
-    if ($result === null) {
-        http_response_code(503);
+    if ($availability === 'available') {
+        // Confirmed available — no need to fetch WHOIS details
         echo json_encode([
-            'success' => false,
-            'error'   => 'Domain lookup is temporarily unavailable. Please try again in a moment.',
+            'success'   => true,
+            'available' => true,
+            'domain'    => $domain,
         ]);
         exit();
     }
 
-    $result['success'] = true;
-    echo json_encode($result);
+    if ($availability === 'taken') {
+        // Confirmed taken — fetch full WHOIS details
+        $details = fetchWhoisDetails($domain);
+        echo json_encode(array_merge([
+            'success'   => true,
+            'available' => false,
+            'domain'    => $domain,
+        ], $details));
+        exit();
+    }
+
+    // ------------------------------------------------------------------
+    // 2. Availability API failed — try hardcoded list
+    // ------------------------------------------------------------------
+    $fallback = hardcodedFallback($domain);
+    if ($fallback !== null) {
+        $fallback['success'] = true;
+        echo json_encode($fallback);
+        exit();
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Everything failed — return a real error, not a wrong answer
+    // ------------------------------------------------------------------
+    http_response_code(503);
+    echo json_encode([
+        'success' => false,
+        'error'   => 'Domain lookup is temporarily unavailable. Please try again in a moment.',
+    ]);
 
 } else {
     http_response_code(405);
