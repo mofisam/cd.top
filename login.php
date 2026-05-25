@@ -122,7 +122,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <!-- Logo -->
             <div class="text-center mb-8">
                 <a href="index.php" class="inline-flex items-center gap-3">
-                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-green-500 rounded-full flex items-center justify-center">
+                    <div class="w-12 h-12 bg-gradient-to-br from-green-500 to-light-500 rounded-full flex items-center justify-center">
                     <img src="images/logo.png" alt="checkdomain.top" class="custom-logo" onerror="this.src='https://via.placeholder.com/60x60?text=CD'">
                     </div>
                     <h1 class="text-2xl font-bold bg-gradient-to-r from-white via-blue-300 to-green-300 bg-clip-text text-transparent">checkdomain<span class="text-green-400">.</span>top</h1>

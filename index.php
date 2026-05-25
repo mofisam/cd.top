@@ -55,20 +55,6 @@ require_once 'includes/header.php';
             </span>
             <?php endforeach; ?>
           </div>
-          
-          <!-- Popular Searches -->
-          <?php if (!empty($popularSearches)): ?>
-          <div class="mt-5 text-left">
-            <p class="text-xs text-gray-400 mb-2">Popular searches:</p>
-            <div class="flex flex-wrap gap-2">
-              <?php foreach ($popularSearches as $search): ?>
-              <span class="rounded-full bg-slate-900/70 px-3 py-1.5 text-xs text-blue-300 cursor-pointer hover:text-blue-200 popular-search" data-search="<?php echo htmlspecialchars($search['search_term']); ?>">
-                <?php echo htmlspecialchars($search['search_term']); ?>
-              </span>
-              <?php endforeach; ?>
-            </div>
-          </div>
-          <?php endif; ?>
 
           <div id="captchaPanel" class="hidden mt-4 max-w-md rounded-lg border border-yellow-500/40 bg-yellow-950/20 p-4 text-left">
             <label for="captchaAnswer" class="block text-xs font-semibold text-yellow-200 mb-2">
@@ -180,7 +166,7 @@ require_once 'includes/header.php';
           badge = document.createElement('div');
           badge.id = 'pinnedCounterBadge';
           badge.className = 'fixed bottom-20 left-4 bg-slate-900/80 backdrop-blur rounded-full px-3 py-1.5 text-xs border border-blue-500/60 z-30 flex items-center gap-2 cursor-pointer hover:scale-105 transition';
-          badge.onclick = () => showToast(`You have ${pinnedDomains.size} pinned domain(s). You'll get alerts when they become available.`, false);
+          badge.onclick = () => showToast(`You have ${pinnedDomains.size} pinned domain(s). Coming soon!`, false);
           document.body.appendChild(badge);
         }
         badge.innerHTML = `<i class="fas fa-thumbtack text-green-400"></i> ${pinnedDomains.size} pinned domain${pinnedDomains.size > 1 ? 's' : ''}`;

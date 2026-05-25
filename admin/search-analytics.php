@@ -4,6 +4,7 @@ $user = checkAdminAuth();
 require_once '../config/database.php';
 
 $conn = getDBConnection();
+ensureDomainSearchTables($conn);
 $stats = getDomainSearchStats(30);
 
 // Get recent searches

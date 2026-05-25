@@ -158,6 +158,18 @@ function hardcodedFallback($domain) {
     return null;
 }
 
+function recordDomainSearchResult($domain, $isAvailable) {
+    $parts = explode('.', strtolower($domain));
+    $tld = array_pop($parts);
+    $searchTerm = implode('.', $parts);
+
+    if ($searchTerm === '') {
+        $searchTerm = strtolower($domain);
+    }
+
+    logDomainSearch(strtolower($domain), $tld, $searchTerm, $isAvailable);
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
@@ -210,6 +222,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $availability = checkAvailability($domain);
 
     if ($availability === 'available') {
+        recordDomainSearchResult($domain, true);
+
         // Confirmed available — no need to fetch WHOIS details
         echo json_encode([
             'success'   => true,
@@ -222,6 +236,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($availability === 'taken') {
         // Confirmed taken — fetch full WHOIS details
         $details = fetchWhoisDetails($domain);
+        recordDomainSearchResult($domain, false);
+
         echo json_encode(array_merge([
             'success'   => true,
             'available' => false,
@@ -236,6 +252,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fallback = hardcodedFallback($domain);
     if ($fallback !== null) {
         $fallback['success'] = true;
+        recordDomainSearchResult($domain, (bool) ($fallback['available'] ?? false));
         echo json_encode($fallback);
         exit();
     }

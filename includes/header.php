@@ -1,6 +1,7 @@
 <?php
 $pageTitle = $pageTitle ?? 'checkdomain.top - Check Domain Availability Instantly';
 $pageDescription = $pageDescription ?? 'Check if any domain is available for registration. Never miss your perfect domain again.';
+$showHeaderHero = $showHeaderHero ?? true;
 $popularTLDCount = isset($popularTLDs) && is_array($popularTLDs) ? count($popularTLDs) : 0;
 $appBasePath = $appBasePath ?? rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
 if ($appBasePath === '/' || $appBasePath === '.' || $appBasePath === '\\') {
@@ -221,17 +222,24 @@ $assetUrl = $assetUrl ?? function ($path) use ($appBasePath) {
           </div>
         </a>
         <div class="flex items-center gap-5 text-sm">
+          <a href="<?php echo htmlspecialchars($assetUrl('about.php'), ENT_QUOTES, 'UTF-8'); ?>" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
+            <i class="fas fa-circle-info text-xs"></i>
+            About
+          </a>
           <a href="<?php echo htmlspecialchars($assetUrl('contact.php'), ENT_QUOTES, 'UTF-8'); ?>" id="contactLink" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
             <i class="fas fa-envelope text-xs"></i>
             Contact
           </a>
-          <a href="<?php echo htmlspecialchars($assetUrl('admin/login.php'), ENT_QUOTES, 'UTF-8'); ?>" id="loginLink" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
+          <!--
+          <a href="<?php echo htmlspecialchars($assetUrl('login.php'), ENT_QUOTES, 'UTF-8'); ?>" id="loginLink" class="nav-link text-gray-300 hover:text-blue-400 transition flex items-center gap-2">
             <i class="fas fa-sign-in-alt text-xs"></i>
             Login
           </a>
+           -->
         </div>
       </nav>
 
+      <?php if ($showHeaderHero): ?>
       <section class="grid gap-6 py-10 md:py-12 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-end">
         <div class="max-w-3xl text-left">
           <div class="hero-chip inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium text-sky-100">
@@ -273,3 +281,4 @@ $assetUrl = $assetUrl ?? function ($path) use ($appBasePath) {
           </div>
         </div>
       </section>
+      <?php endif; ?>
