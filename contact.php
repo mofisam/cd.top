@@ -65,7 +65,7 @@ require_once 'includes/header.php';
               </div>
               <div>
                 <h2 class="font-semibold text-white">Support Hours</h2>
-                <p class="text-sm text-slate-400">Mon - Fri, 9AM - 6PM EST</p>
+                <p class="text-sm text-slate-400">Mon - Fri, 9AM - 6PM WAT</p>
               </div>
             </div>
             <p class="mt-4 text-sm leading-6 text-slate-300">
