@@ -276,7 +276,7 @@ require_once 'includes/header.php';
               <i class="fas fa-check-circle text-3xl animate-pulse"></i>
               <span class="text-xl font-bold">${escapeHtml(domain)} is AVAILABLE!</span>
             </div>
-            <p class="text-gray-300 text-md">Congratulations. This domain is ready for registration.</p>
+            <p class="text-gray-300 text-md">Congratulations. This domain is avaliable for registration.</p>
             <div class="mt-4 flex justify-center gap-3">
               <button class="bg-gradient-to-r from-green-600 to-emerald-600 text-white px-6 py-2 rounded-xl text-sm font-medium transition">
                 <i class="fas fa-shopping-cart"></i> Register Now
