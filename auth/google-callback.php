@@ -2,18 +2,56 @@
 session_start();
 require_once '../config/oauth.php';
 require_once '../lib/Auth.php';
+require_once '../lib/session_cookie.php';
 
-// Verify state
-if (!isset($_GET['state']) || $_GET['state'] !== $_SESSION['oauth_state']) {
-    die('Invalid state');
+function redirectToLoginWithError(string $message): void {
+    header('Location: ../login.php?error=' . urlencode($message));
+    exit();
 }
 
+function fetchJsonWithCurl(string $url, array $options = []): array {
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+
+    foreach ($options as $option => $value) {
+        curl_setopt($ch, $option, $value);
+    }
+
+    $response = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($response === false || $curlError !== '') {
+        redirectToLoginWithError('Google login is unavailable right now. Please try again.');
+    }
+
+    $data = json_decode($response, true);
+    if (!is_array($data)) {
+        redirectToLoginWithError('Google returned an unexpected response. Please try again.');
+    }
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        $message = $data['error_description'] ?? $data['error'] ?? 'Google authorization failed.';
+        redirectToLoginWithError($message);
+    }
+
+    return $data;
+}
+
+// Verify state
+if (empty($_SESSION['oauth_state']) || !isset($_GET['state']) || !hash_equals($_SESSION['oauth_state'], (string) $_GET['state'])) {
+    redirectToLoginWithError('Google login session expired. Please try again.');
+}
+unset($_SESSION['oauth_state']);
+
 if (isset($_GET['error'])) {
-    die('Authorization failed: ' . $_GET['error']);
+    redirectToLoginWithError('Google authorization failed: ' . (string) $_GET['error']);
 }
 
 if (!isset($_GET['code'])) {
-    die('No authorization code received');
+    redirectToLoginWithError('No Google authorization code was received.');
 }
 
 // Exchange code for token
@@ -26,52 +64,42 @@ $tokenData = [
     'grant_type' => 'authorization_code'
 ];
 
-$ch = curl_init();
-curl_setopt($ch, CURLOPT_URL, $tokenUrl);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($tokenData));
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-$response = curl_exec($ch);
-curl_close($ch);
-
-$tokenData = json_decode($response, true);
+$tokenData = fetchJsonWithCurl($tokenUrl, [
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => http_build_query($tokenData),
+]);
 
 if (!isset($tokenData['access_token'])) {
-    die('Failed to get access token');
+    redirectToLoginWithError('Failed to get a Google access token.');
 }
 
 // Get user info
 $userInfoUrl = 'https://www.googleapis.com/oauth2/v2/userinfo';
-$ch = curl_init();
-curl_setopt($ch, CURLOPT_URL, $userInfoUrl);
-curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . $tokenData['access_token']]);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-$userInfo = curl_exec($ch);
-curl_close($ch);
+$user = fetchJsonWithCurl($userInfoUrl, [
+    CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . $tokenData['access_token']],
+]);
 
-$user = json_decode($userInfo, true);
-
-if (!isset($user['id'])) {
-    die('Failed to get user info');
+if (!isset($user['id'], $user['email'])) {
+    redirectToLoginWithError('Failed to get your Google account details.');
 }
 
 // Login or register user
 $auth = new Auth();
-$ip = $_SERVER['REMOTE_ADDR'];
-$userAgent = $_SERVER['HTTP_USER_AGENT'];
+$ip = $_SERVER['REMOTE_ADDR'] ?? '';
+$userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
 $result = $auth->socialLogin(
     'google',
     $user['id'],
     $user['email'],
-    $user['name'],
-    $user['picture'],
+    $user['name'] ?? $user['email'],
+    $user['picture'] ?? null,
     $ip,
     $userAgent
 );
 
 if ($result['success']) {
-    setcookie('session_token', $result['session_token'], time() + (86400 * 7), '/', '', true, true);
+    setAuthSessionCookie($result['session_token']);
     $_SESSION['user'] = $result['user'];
     header('Location: ../dashboard.php');
 } else {

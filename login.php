@@ -1,14 +1,15 @@
 <?php
 session_start();
 require_once 'lib/Auth.php';
+require_once 'lib/session_cookie.php';
 
 $auth = new Auth();
-$error = '';
-$success = '';
+$error = isset($_GET['error']) ? trim((string) $_GET['error']) : '';
+$success = isset($_GET['success']) ? trim((string) $_GET['success']) : '';
 
 // Check if already logged in
 if (isset($_COOKIE['session_token'])) {
-    $session = $auth->verifySession($_COKEN['session_token']);
+    $session = $auth->verifySession($_COOKIE['session_token']);
     if ($session) {
         header('Location: dashboard.php');
         exit();
@@ -27,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = $auth->login($email, $password, $ip, $userAgent);
         
         if ($result['success']) {
-            setcookie('session_token', $result['session_token'], time() + (86400 * 7), '/', '', true, true);
+            setAuthSessionCookie($result['session_token']);
             $_SESSION['user'] = $result['user'];
             header('Location: dashboard.php');
             exit();
