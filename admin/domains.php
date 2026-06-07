@@ -4,73 +4,93 @@ $user = checkAdminAuth();
 require_once '../config/database.php';
 
 $conn = getDBConnection();
+ensurePinnedDomainTables($conn);
 
 // Handle status update
 if (isset($_POST['update_status']) && isset($_POST['id']) && isset($_POST['status'])) {
-    $id = $_POST['id'];
+    $id = (int) $_POST['id'];
     $status = $_POST['status'];
     $stmt = $conn->prepare("UPDATE pinned_domains SET status = ? WHERE id = ?");
     $stmt->bind_param("si", $status, $id);
     $stmt->execute();
     $stmt->close();
-    logAdminActivity($user['id'], 'UPDATE_PIN_STATUS', "Updated pinned domain ID: $id to status: $status");
+    logAdminActivity($user['id'], 'UPDATE_WATCHLIST_STATUS', "Updated watchlist domain ID: $id to status: $status");
     header('Location: domains.php');
     exit();
 }
 
 // Handle delete
-if (isset($_GET['delete']) && isset($_GET['id'])) {
-    $id = $_GET['delete'];
+if (isset($_GET['delete'])) {
+    $id = (int) $_GET['delete'];
     $stmt = $conn->prepare("DELETE FROM pinned_domains WHERE id = ?");
     $stmt->bind_param("i", $id);
     $stmt->execute();
     $stmt->close();
-    logAdminActivity($user['id'], 'DELETE_PINNED_DOMAIN', "Deleted pinned domain ID: $id");
+    logAdminActivity($user['id'], 'DELETE_WATCHLIST_DOMAIN', "Deleted watchlist domain ID: $id");
     header('Location: domains.php');
     exit();
 }
 
 // Search functionality
-$search = $_GET['search'] ?? '';
+$search = trim((string) ($_GET['search'] ?? ''));
 $whereClause = "";
+$searchParams = [];
+$searchTypes = "";
 if (!empty($search)) {
-    $whereClause = "WHERE pd.domain_name LIKE '%$search%' OR s.email LIKE '%$search%'";
+    $whereClause = "WHERE pd.domain_name LIKE ? OR u.email LIKE ? OR u.full_name LIKE ?";
+    $searchTerm = "%{$search}%";
+    $searchParams = [$searchTerm, $searchTerm, $searchTerm];
+    $searchTypes = "sss";
 }
 
 // Pagination
-$page = $_GET['page'] ?? 1;
+$page = max(1, (int) ($_GET['page'] ?? 1));
 $limit = 20;
 $offset = ($page - 1) * $limit;
 
-$countQuery = "SELECT COUNT(*) as count FROM pinned_domains pd LEFT JOIN subscribers s ON pd.email = s.email $whereClause";
-$total = $conn->query($countQuery)->fetch_assoc()['count'];
-$totalPages = ceil($total / $limit);
+$countQuery = "SELECT COUNT(*) as count FROM pinned_domains pd LEFT JOIN users u ON pd.user_id = u.id $whereClause";
+$countStmt = $conn->prepare($countQuery);
+if (!empty($searchParams)) {
+    $countStmt->bind_param($searchTypes, ...$searchParams);
+}
+$countStmt->execute();
+$total = (int) $countStmt->get_result()->fetch_assoc()['count'];
+$countStmt->close();
+$totalPages = (int) ceil($total / $limit);
 
-$pinnedDomains = $conn->query("
-    SELECT pd.*, s.email, s.name 
+$domainsStmt = $conn->prepare("
+    SELECT pd.*, COALESCE(u.email, pd.email) as user_email, u.full_name
     FROM pinned_domains pd 
-    LEFT JOIN subscribers s ON pd.email = s.email 
+    LEFT JOIN users u ON pd.user_id = u.id 
     $whereClause
     ORDER BY pd.pinned_at DESC 
-    LIMIT $offset, $limit
+    LIMIT ?, ?
 ");
+if (!empty($searchParams)) {
+    $params = array_merge($searchParams, [$offset, $limit]);
+    $domainsStmt->bind_param($searchTypes . "ii", ...$params);
+} else {
+    $domainsStmt->bind_param("ii", $offset, $limit);
+}
+$domainsStmt->execute();
+$watchlistDomains = $domainsStmt->get_result();
 
 // Get statistics
 $stats = $conn->query("
     SELECT 
-        COUNT(*) as total_pins,
-        COUNT(DISTINCT email) as unique_users,
+        COUNT(*) as total_watchlist,
+        COUNT(DISTINCT user_id) as unique_users,
         COUNT(DISTINCT domain_name) as unique_domains
     FROM pinned_domains 
     WHERE status = 'active'
 ")->fetch_assoc();
 
 $topDomains = $conn->query("
-    SELECT domain_name, COUNT(*) as pin_count 
+    SELECT domain_name, COUNT(*) as watch_count 
     FROM pinned_domains 
     WHERE status = 'active'
     GROUP BY domain_name 
-    ORDER BY pin_count DESC 
+    ORDER BY watch_count DESC 
     LIMIT 5
 ");
 $conn->close();
@@ -81,7 +101,7 @@ $conn->close();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>Pinned Domains - checkdomain.top Admin</title>
+    <title>Watchlist Domains - checkdomain.top Admin</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
@@ -249,8 +269,8 @@ $conn->close();
             <!-- Header -->
             <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
                 <div>
-                    <h1 class="text-2xl md:text-3xl font-bold">Pinned Domains</h1>
-                    <p class="text-gray-400 text-sm mt-1">Manage domains that users want to be notified about</p>
+                    <h1 class="text-2xl md:text-3xl font-bold">Watchlist Domains</h1>
+                    <p class="text-gray-400 text-sm mt-1">Manage domains that logged-in users want to monitor</p>
                 </div>
                 <button onclick="window.location.reload()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg transition w-full sm:w-auto">
                     <i class="fas fa-sync-alt"></i> Refresh
@@ -262,11 +282,11 @@ $conn->close();
                 <div class="stat-card rounded-xl p-4 md:p-6">
                     <div class="flex justify-between items-start">
                         <div>
-                            <p class="text-gray-400 text-xs md:text-sm">Total Pins</p>
-                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($stats['total_pins']); ?></p>
+                            <p class="text-gray-400 text-xs md:text-sm">Total Watchlist</p>
+                            <p class="text-2xl md:text-3xl font-bold mt-2"><?php echo number_format($stats['total_watchlist']); ?></p>
                         </div>
                         <div class="w-10 h-10 md:w-12 md:h-12 bg-blue-500/20 rounded-full flex items-center justify-center">
-                            <i class="fas fa-thumbtack text-blue-400 text-lg md:text-xl"></i>
+                            <i class="fas fa-bookmark text-blue-400 text-lg md:text-xl"></i>
                         </div>
                     </div>
                 </div>
@@ -300,7 +320,7 @@ $conn->close();
             <div class="mb-6">
                 <form method="GET" class="search-form flex flex-col sm:flex-row gap-3">
                     <div class="flex-1">
-                        <input type="text" name="search" placeholder="Search by domain or email..." 
+                        <input type="text" name="search" placeholder="Search by domain, email, or name..." 
                                value="<?php echo htmlspecialchars($search); ?>"
                                class="w-full bg-slate-800 border border-blue-500/30 rounded-lg py-2 px-4 text-white placeholder:text-gray-400 focus:outline-none focus:border-blue-500">
                     </div>
@@ -320,18 +340,18 @@ $conn->close();
             <!-- Top Domains Section -->
             <?php if ($topDomains->num_rows > 0): ?>
             <div class="chart-container bg-slate-800/50 rounded-xl p-4 md:p-6 mb-8">
-                <h3 class="text-base md:text-lg font-semibold mb-4">Most Pinned Domains</h3>
+                <h3 class="text-base md:text-lg font-semibold mb-4">Most Watchlisted Domains</h3>
                 <div class="space-y-3">
                     <?php while($row = $topDomains->fetch_assoc()): ?>
                     <div>
                         <div class="flex justify-between text-sm mb-1">
                             <span class="font-mono"><?php echo htmlspecialchars($row['domain_name']); ?></span>
-                            <span class="text-blue-400"><?php echo $row['pin_count']; ?> pins</span>
+                            <span class="text-blue-400"><?php echo $row['watch_count']; ?> watches</span>
                         </div>
                         <div class="w-full bg-slate-700 rounded-full h-2">
                             <?php 
-                            $maxPins = $topDomains->num_rows > 0 ? $row['pin_count'] : 1;
-                            $percentage = ($row['pin_count'] / max($stats['total_pins'], 1)) * 100;
+                            $maxWatches = $topDomains->num_rows > 0 ? $row['watch_count'] : 1;
+                            $percentage = ($row['watch_count'] / max($stats['total_watchlist'], 1)) * 100;
                             ?>
                             <div class="bg-gradient-to-r from-blue-500 to-green-500 h-2 rounded-full" style="width: <?php echo $percentage; ?>%"></div>
                         </div>
@@ -341,29 +361,29 @@ $conn->close();
             </div>
             <?php endif; ?>
             
-            <!-- Pinned Domains Table -->
+            <!-- Watchlist Domains Table -->
             <div class="bg-slate-800/50 rounded-xl overflow-hidden">
                 <div class="overflow-x-auto">
                     <table class="data-table w-full">
                         <thead class="bg-slate-700/50 border-b border-gray-700">
                             <tr>
                                 <th class="text-left p-3 md:p-4">Domain</th>
-                                <th class="text-left p-3 md:p-4">Subscriber</th>
+                                <th class="text-left p-3 md:p-4">User</th>
                                 <th class="text-left p-3 md:p-4 hidden md:table-cell">Name</th>
-                                <th class="text-left p-3 md:p-4">Pinned Date</th>
+                                <th class="text-left p-3 md:p-4">Watchlisted Date</th>
                                 <th class="text-left p-3 md:p-4">Status</th>
                                 <th class="text-left p-3 md:p-4">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <?php if ($pinnedDomains->num_rows > 0): ?>
-                                <?php while($row = $pinnedDomains->fetch_assoc()): ?>
+                            <?php if ($watchlistDomains->num_rows > 0): ?>
+                                <?php while($row = $watchlistDomains->fetch_assoc()): ?>
                                 <tr class="border-b border-gray-700 hover:bg-slate-700/30 transition">
                                     <td class="p-3 md:p-4">
                                         <span class="font-mono text-sm"><?php echo htmlspecialchars($row['domain_name']); ?></span>
                                     </td>
                                     <td class="p-3 md:p-4">
-                                        <span class="text-sm"><?php echo htmlspecialchars($row['email']); ?></span>
+                                        <span class="text-sm"><?php echo htmlspecialchars($row['user_email']); ?></span>
                                     </td>
                                     <td class="p-3 md:p-4 hidden md:table-cell">
                                         <span class="text-sm"><?php echo htmlspecialchars($row['name'] ?: '—'); ?></span>

@@ -86,9 +86,9 @@ require_once 'includes/header.php';
           <p class="mt-1 text-xs text-slate-400">Quick status feedback for common domains.</p>
         </div>
         <div class="feature-card rounded-lg p-4 text-left">
-          <i class="fas fa-thumbtack text-green-400 text-xl"></i>
-          <p class="mt-3 text-sm font-semibold">Pin & Monitor</p>
-          <p class="mt-1 text-xs text-slate-400">Save taken names for future alerts.</p>
+          <i class="fas fa-bookmark text-green-400 text-xl"></i>
+          <p class="mt-3 text-sm font-semibold">Watchlist & Monitor</p>
+          <p class="mt-1 text-xs text-slate-400">Add taken names to your watchlist for future alerts.</p>
         </div>
         <div class="feature-card rounded-lg p-4 text-left">
           <i class="fas fa-lightbulb text-purple-400 text-xl"></i>
@@ -139,40 +139,64 @@ require_once 'includes/header.php';
   <script>
     const APP_BASE_PATH = <?php echo json_encode($appBasePath ?? ''); ?>;
     const appUrl = (path) => `${APP_BASE_PATH}/${String(path).replace(/^\/+/, '')}`;
-    let pinnedDomains = new Map();
+    let watchlistDomains = new Map();
     let suggestionsTimeout;
     
-    function loadPinnedFromStorage() {
-      const stored = localStorage.getItem("checkdomain_pins");
-      if(stored) {
-        try {
-          const parsed = JSON.parse(stored);
-          pinnedDomains = new Map(Object.entries(parsed));
-          updatePinnedBadge();
-        } catch(e) { console.warn(e); }
+    async function loadWatchlistFromDatabase() {
+      try {
+        const response = await fetch(appUrl('api/watchlist-domain.php'));
+        if (response.status === 401) {
+          watchlistDomains = new Map();
+          updateWatchlistBadge();
+          return;
+        }
+
+        const data = await parseJsonResponse(response);
+        if (data.success && Array.isArray(data.domains)) {
+          watchlistDomains = new Map(data.domains.map((item) => [item.domain, item]));
+          updateWatchlistBadge();
+        }
+      } catch(e) {
+        console.warn(e);
       }
     }
     
-    function savePinnedToStorage() {
-      const obj = Object.fromEntries(pinnedDomains);
-      localStorage.setItem("checkdomain_pins", JSON.stringify(obj));
-      updatePinnedBadge();
+    function redirectToLoginForWatchlist() {
+      showToast('Please login to add domains to your watchlist.', true);
+      setTimeout(() => {
+        window.location.href = appUrl('login.php');
+      }, 900);
     }
     
-    function updatePinnedBadge() {
-      let badge = document.getElementById('pinnedCounterBadge');
-      if(pinnedDomains.size > 0) {
+    function updateWatchlistBadge() {
+      let badge = document.getElementById('watchlistCounterBadge');
+      if(watchlistDomains.size > 0) {
         if(!badge) {
           badge = document.createElement('div');
-          badge.id = 'pinnedCounterBadge';
+          badge.id = 'watchlistCounterBadge';
           badge.className = 'fixed bottom-20 left-4 bg-slate-900/80 backdrop-blur rounded-full px-3 py-1.5 text-xs border border-blue-500/60 z-30 flex items-center gap-2 cursor-pointer hover:scale-105 transition';
-          badge.onclick = () => showToast(`You have ${pinnedDomains.size} pinned domain(s). Coming soon!`, false);
+          badge.onclick = () => { window.location.href = appUrl('dashboard.php'); };
           document.body.appendChild(badge);
         }
-        badge.innerHTML = `<i class="fas fa-thumbtack text-green-400"></i> ${pinnedDomains.size} pinned domain${pinnedDomains.size > 1 ? 's' : ''}`;
+        badge.innerHTML = `<i class="fas fa-bookmark text-green-400"></i> ${watchlistDomains.size} watchlist domain${watchlistDomains.size > 1 ? 's' : ''}`;
       } else if(badge) {
         badge.remove();
       }
+    }
+
+    async function addDomainToWatchlist(domain) {
+      const response = await fetch(appUrl('api/watchlist-domain.php'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: domain })
+      });
+
+      if (response.status === 401) {
+        redirectToLoginForWatchlist();
+        return { success: false, requiresLogin: true };
+      }
+
+      return await parseJsonResponse(response);
     }
     
     function showToast(message, isError = false) {
@@ -265,7 +289,7 @@ require_once 'includes/header.php';
       const resultContainer = document.getElementById('availabilityCard');
       const placeholderMsg = document.getElementById('placeholderMsg');
       const normalizedDomain = domain.toLowerCase();
-      const isPinned = pinnedDomains.has(normalizedDomain);
+      const isWatchlisted = watchlistDomains.has(normalizedDomain);
       
       let html = '';
       
@@ -324,16 +348,16 @@ require_once 'includes/header.php';
               </div>
             </div>
             
-            <p class="text-gray-300 text-sm">Pin this domain and we'll notify you when it becomes available.</p>
+            <p class="text-gray-300 text-sm">Add this domain to your watchlist and we'll notify you when it becomes available.</p>
             
-            ${!isPinned ? 
+            ${!isWatchlisted ? 
               `<div class="mt-2">
-                <button id="pinDomainBtn" class="btn-secondary text-white font-medium px-6 py-2.5 rounded-xl shadow-lg flex items-center gap-2 mx-auto transition">
-                  <i class="fas fa-thumbtack"></i> Pin & Get Alerts
+                <button id="watchlistDomainBtn" class="btn-secondary text-white font-medium px-6 py-2.5 rounded-xl shadow-lg flex items-center gap-2 mx-auto transition">
+                  <i class="fas fa-bookmark"></i> Add to Watchlist
                 </button>
               </div>` : 
               `<div class="mt-2 bg-blue-900/40 rounded-xl p-3 text-sm text-blue-300">
-                <i class="fas fa-check-circle"></i> Already pinned! You'll receive alerts.
+                <i class="fas fa-check-circle"></i> Already on your watchlist! You'll receive alerts.
               </div>`
             }
           </div>
@@ -352,20 +376,45 @@ require_once 'includes/header.php';
         });
       });
       
-      if (!data.available && !isPinned) {
-        const pinBtn = document.getElementById('pinDomainBtn');
-        if (pinBtn) pinBtn.addEventListener('click', () => handlePinDomain(normalizedDomain));
+      if (!data.available && !isWatchlisted) {
+        const watchlistBtn = document.getElementById('watchlistDomainBtn');
+        if (watchlistBtn) watchlistBtn.addEventListener('click', () => handleWatchlistDomain(normalizedDomain));
       }
     }
     
-    function handlePinDomain(domain) {
-      if(pinnedDomains.has(domain)) {
-        showToast(`"${domain}" is already pinned.`, false);
+    async function handleWatchlistDomain(domain) {
+      if(watchlistDomains.has(domain)) {
+        showToast(`"${domain}" is already on your watchlist.`, false);
         return;
       }
-      pinnedDomains.set(domain, { pinDate: new Date().toISOString() });
-      savePinnedToStorage();
-      showToast(`Pinned "${domain}". You'll be notified when available.`, false);
+
+      const button = document.getElementById('watchlistDomainBtn');
+      if (button) {
+        button.disabled = true;
+        button.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Adding...';
+      }
+
+      try {
+        const data = await addDomainToWatchlist(domain);
+        if (!data.success) {
+          if (!data.requiresLogin) {
+            showToast(data.message || 'Could not add this domain to your watchlist.', true);
+          }
+          return;
+        }
+
+        watchlistDomains.set(data.domain || domain, { watchlistDate: new Date().toISOString() });
+        updateWatchlistBadge();
+        showToast(data.message || `Added "${domain}" to your watchlist.`, false);
+        performCheck();
+      } catch (error) {
+        showToast(error.message || 'Could not add this domain to your watchlist.', true);
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.innerHTML = '<i class="fas fa-bookmark"></i> Add to Watchlist';
+        }
+      }
     }
     
     function escapeHtml(str) {
@@ -599,7 +648,7 @@ require_once 'includes/header.php';
     });
     
     // Initialize
-    loadPinnedFromStorage();
+    loadWatchlistFromDatabase();
     
     // Rotating placeholder examples
     const examples = ['mybrand', 'startup', 'techcompany', 'onlinestore', 'blogger'];

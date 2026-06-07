@@ -17,12 +17,13 @@ $assetUrl = $assetUrl ?? function ($path) use ($appBasePath) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
   <title><?php echo htmlspecialchars($pageTitle, ENT_QUOTES, 'UTF-8'); ?></title>
-  <link rel="icon" type="image/png" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon-96x96.png'), ENT_QUOTES, 'UTF-8'); ?>" sizes="96x96" />
-  <link rel="icon" type="image/svg+xml" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon.svg'), ENT_QUOTES, 'UTF-8'); ?>" />
-  <link rel="shortcut icon" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon.ico'), ENT_QUOTES, 'UTF-8'); ?>" />
-  <link rel="apple-touch-icon" sizes="180x180" href="<?php echo htmlspecialchars($assetUrl('favicon/apple-touch-icon.png'), ENT_QUOTES, 'UTF-8'); ?>" />
+  <link rel="icon" type="image/png" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon-96x96.png?v=20260604'), ENT_QUOTES, 'UTF-8'); ?>" sizes="96x96" />
+  <link rel="icon" type="image/svg+xml" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon.svg?v=20260604'), ENT_QUOTES, 'UTF-8'); ?>" />
+  <link rel="shortcut icon" href="<?php echo htmlspecialchars($assetUrl('favicon/favicon.ico?v=20260604?v=20260604'), ENT_QUOTES, 'UTF-8'); ?>" />
+  <link rel="apple-touch-icon" sizes="180x180" href="<?php echo htmlspecialchars($assetUrl('favicon/apple-touch-icon.png?v=20260604'), ENT_QUOTES, 'UTF-8'); ?>" />
   <meta name="apple-mobile-web-app-title" content="checkdomain" />
-  <link rel="manifest" href="<?php echo htmlspecialchars($assetUrl('favicon/site.webmanifest'), ENT_QUOTES, 'UTF-8'); ?>" />
+  <link rel="manifest" href="<?php echo htmlspecialchars($assetUrl('favicon/site.webmanifest?v=20260604'), ENT_QUOTES, 'UTF-8'); ?>" />
+
   <meta name="description" content="<?php echo htmlspecialchars($pageDescription, ENT_QUOTES, 'UTF-8'); ?>">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -250,12 +251,12 @@ $assetUrl = $assetUrl ?? function ($path) use ($appBasePath) {
             Find a domain name before someone else does.
           </h1>
           <p class="mt-4 max-w-2xl text-base leading-7 text-slate-300 md:text-lg">
-            Check availability, compare useful alternatives, and pin taken names so you can move quickly when the right domain opens up.
+            Check availability, compare useful alternatives, and add taken names to your watchlist so you can move quickly when the right domain opens up.
           </p>
           <div class="mt-5 flex flex-wrap gap-2 text-xs text-slate-300">
             <span class="hero-chip rounded-full px-3 py-1.5"><i class="fas fa-shield-halved mr-1 text-sky-300"></i> Private searches</span>
             <span class="hero-chip rounded-full px-3 py-1.5"><i class="fas fa-bolt mr-1 text-amber-300"></i> Fast lookup</span>
-            <span class="hero-chip rounded-full px-3 py-1.5"><i class="fas fa-thumbtack mr-1 text-green-300"></i> Pin domains</span>
+            <span class="hero-chip rounded-full px-3 py-1.5"><i class="fas fa-bookmark mr-1 text-green-300"></i> Watchlist domains</span>
           </div>
         </div>
 
