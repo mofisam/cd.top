@@ -464,7 +464,7 @@ body::before{content:'';position:fixed;inset:0;
 .tl-step:last-child::after{display:none}
 .tl-step.done::after{background:var(--green)}
 .tl-dot{width:20px;height:20px;border-radius:50%;border:2px solid var(--border);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:9px;z-index:1;margin-bottom:5px}
-.tl-step.done .tl-dot{border-color:var(--green);background:var(--green-bg);color:var(--green2)}
+.tl-step.done .tl-dot{border-color:var(--green);background:black;color:var(--green2)}
 .tl-step.active .tl-dot{border-color:var(--amber);background:var(--amber-bg);color:var(--amber);animation:pulse 2s infinite}
 .tl-step.failed .tl-dot{border-color:var(--coral);background:var(--coral-bg);color:var(--coral)}
 .tl-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;text-align:center}

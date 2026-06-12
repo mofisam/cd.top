@@ -64,7 +64,7 @@ $navGroups = [
     'Domain Services' => [
         ['id'=>'backorders',       'label'=>'Backorders',      'icon'=>'fa-clock',          'href'=>'backorders.php',  'badge'=>$pendingBackorders, 'badge_class'=>'amber'],
         ['id'=>'broker',           'label'=>'Broker requests', 'icon'=>'fa-handshake',      'href'=>'broker.php',      'badge'=>$pendingBroker, 'badge_class'=>'coral'],
-        ['id'=>'domains',          'label'=>'Watchlist',       'icon'=>'fa-bookmark',       'href'=>'domains.php'],
+        ['id'=>'domains',          'label'=>'Watchlist',       'icon'=>'fa-bookmark',       'href'=>'watchlist.php'],
         ['id'=>'dead-sites',       'label'=>'Dead site scans', 'icon'=>'fa-skull',          'href'=>'dead-sites.php'],
         ['id'=>'whois',            'label'=>'WHOIS lookups',   'icon'=>'fa-search',         'href'=>'whois.php'],
         ['id'=>'alerts',           'label'=>'Alerts',          'icon'=>'fa-bell',           'href'=>'alerts.php',      'badge'=>$unreadAlerts, 'badge_class'=>'amber'],

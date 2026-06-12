@@ -1,457 +1,3 @@
-<?php
-session_start();
-require_once 'lib/Auth.php';
-require_once 'config/database.php';
-
-$auth = new Auth();
-
-// ── Auth guard ─────────────────────────────────────────────
-if (!isset($_COOKIE['session_token'])) { header('Location: login.php'); exit(); }
-$session = $auth->verifySession($_COOKIE['session_token']);
-if (!$session) {
-    setcookie('session_token', '', time() - 3600, '/');
-    header('Location: login.php');
-    exit();
-}
-
-// ── URL helper ─────────────────────────────────────────────
-$appBasePath = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
-if (in_array($appBasePath, ['/', '.', '\\'])) { $appBasePath = ''; }
-$assetUrl = fn(string $p): string => ($appBasePath ?: '') . '/' . ltrim($p, '/');
-
-// ── WHOIS API key ──────────────────────────────────────────
-$whoisApiKey = defined('WHOIS_API_KEY') ? WHOIS_API_KEY : 'at_Tum0rTrVQkxRo3NjRDgRxeWiJwXTN';
-$creditCost  = 3; // credits per WHOIS lookup
-
-// ── DB setup ───────────────────────────────────────────────
-$conn = getDBConnection();
-
-// Create whois_lookups cache table
-$conn->query("
-    CREATE TABLE IF NOT EXISTS whois_lookups (
-        id              INT UNSIGNED     NOT NULL AUTO_INCREMENT,
-        user_id         INT  NOT NULL,
-        domain_name     VARCHAR(253)     NOT NULL,
-        tld             VARCHAR(63)      NOT NULL,
-        credits_spent   TINYINT UNSIGNED NOT NULL DEFAULT 3,
-        -- Parsed fields
-        registrar       VARCHAR(255)     NULL,
-        registrar_url   VARCHAR(512)     NULL,
-        registrant_name VARCHAR(255)     NULL,
-        registrant_org  VARCHAR(255)     NULL,
-        registrant_country VARCHAR(10)   NULL,
-        registrant_email VARCHAR(320)    NULL,
-        created_date    DATE             NULL,
-        updated_date    DATE             NULL,
-        expiry_date     DATE             NULL,
-        status          VARCHAR(512)     NULL  COMMENT 'Space-separated EPP status codes',
-        nameservers     TEXT             NULL  COMMENT 'JSON array',
-        dnssec          VARCHAR(64)      NULL,
-        is_available    TINYINT(1)       NOT NULL DEFAULT 0,
-        raw_response    MEDIUMTEXT       NULL,
-        source          ENUM('api','socket','cache') NOT NULL DEFAULT 'api',
-        looked_up_at    TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        INDEX idx_wl_user   (user_id),
-        INDEX idx_wl_domain (domain_name),
-        INDEX idx_wl_date   (looked_up_at),
-        CONSTRAINT fk_wl_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-");
-
-// ── Fetch user ─────────────────────────────────────────────
-$stmt = $conn->prepare("SELECT id, email, full_name, plan, credits FROM users WHERE id = ?");
-$stmt->bind_param("i", $session['user_id']);
-$stmt->execute();
-$user = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-if (!$user) { header('Location: logout.php'); exit(); }
-
-$userPlan   = $user['plan']    ?? 'free';
-$credits    = (int)($user['credits'] ?? 0);
-$canWhois   = ($userPlan !== 'free');
-
-// ── Handle AJAX WHOIS lookup ───────────────────────────────
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-    header('Content-Type: application/json');
-    ob_start();
-
-    $input  = json_decode(file_get_contents('php://input'), true) ?? [];
-    $action = $input['action'] ?? 'lookup';
-
-    if ($action === 'lookup') {
-        if (!$canWhois) {
-            ob_end_clean();
-            echo json_encode(['success'=>false,'requiresUpgrade'=>true,'message'=>'WHOIS lookups require a Pro plan.']);
-            exit();
-        }
-        if ($credits < $creditCost) {
-            ob_end_clean();
-            echo json_encode(['success'=>false,'insufficientCredits'=>true,'message'=>"Not enough credits. WHOIS costs {$creditCost} credits. You have {$credits}."]); exit();
-        }
-
-        $raw    = strtolower(trim($input['domain'] ?? ''));
-        $raw    = preg_replace('#^https?://(www\.)?#', '', $raw);
-        $domain = rtrim($raw, '/');
-
-        if (!$domain || !str_contains($domain, '.') ||
-            !preg_match('/^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/', $domain)) {
-            ob_end_clean();
-            echo json_encode(['success'=>false,'message'=>'Enter a valid domain name.']);
-            exit();
-        }
-
-        $parts = explode('.', $domain);
-        $tld   = implode('.', array_slice($parts, 1));
-
-        // ── Check cache (< 24 hours old) ──────────────────
-        $cacheStmt = $conn->prepare("
-            SELECT * FROM whois_lookups
-            WHERE domain_name = ? AND looked_up_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            ORDER BY looked_up_at DESC LIMIT 1
-        ");
-        $cacheStmt->bind_param("s", $domain);
-        $cacheStmt->execute();
-        $cached = $cacheStmt->get_result()->fetch_assoc();
-        $cacheStmt->close();
-
-        if ($cached) {
-            // Serve from cache — no credit deduction
-            $cached['nameservers'] = json_decode($cached['nameservers'] ?? '[]', true);
-            $cached['from_cache']  = true;
-            $cached['cached_age']  = round((time() - strtotime($cached['looked_up_at'])) / 60) . 'm ago';
-            ob_end_clean();
-            echo json_encode(['success'=>true,'data'=>$cached,'credits_remaining'=>$credits]);
-            exit();
-        }
-
-        // ── Run live WHOIS lookup ─────────────────────────
-        $result = runWhoisLookup($domain, $whoisApiKey);
-
-        if (!$result['success']) {
-            ob_end_clean();
-            echo json_encode($result);
-            exit();
-        }
-
-        $data = $result['data'];
-
-        // ── Deduct credits ─────────────────────────────────
-        $deductStmt = $conn->prepare("UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?");
-        $deductStmt->bind_param("iii", $creditCost, $session['user_id'], $creditCost);
-        $deductStmt->execute();
-        if ($deductStmt->affected_rows === 0) {
-            $deductStmt->close();
-            ob_end_clean();
-            echo json_encode(['success'=>false,'message'=>'Credit deduction failed. Please try again.']);
-            exit();
-        }
-        $deductStmt->close();
-        $creditsAfter = $credits - $creditCost;
-
-        // ── Save to whois_lookups ─────────────────────────
-        $nsJson = json_encode($data['nameservers'] ?? []);
-        $insStmt = $conn->prepare("
-            INSERT INTO whois_lookups
-              (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
-               registrant_name, registrant_org, registrant_country, registrant_email,
-               created_date, updated_date, expiry_date, status, nameservers, dnssec,
-               is_available, raw_response, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ");
-        $insStmt->bind_param("sssssssssssssssssss",
-            // NOTE: bind_param first arg is types string, values follow
-            ...[
-                $session['user_id'], $domain, $tld, $creditCost,
-                $data['registrar'] ?? null, $data['registrar_url'] ?? null,
-                $data['registrant_name'] ?? null, $data['registrant_org'] ?? null,
-                $data['registrant_country'] ?? null, $data['registrant_email'] ?? null,
-                $data['created_date'] ?? null, $data['updated_date'] ?? null,
-                $data['expiry_date'] ?? null,
-                is_array($data['status'] ?? null) ? implode(' ', $data['status']) : ($data['status'] ?? null),
-                $nsJson, $data['dnssec'] ?? null,
-                (int)($data['is_available'] ?? 0),
-                $data['raw'] ?? null,
-                $data['source'] ?? 'api',
-            ]
-        );
-        // Rebuild with correct bind types
-        $insStmt->close();
-        $insStmt2 = $conn->prepare("
-            INSERT INTO whois_lookups
-              (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
-               registrant_name, registrant_org, registrant_country, registrant_email,
-               created_date, updated_date, expiry_date, status, nameservers, dnssec,
-               is_available, raw_response, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ");
-        $isAvailInt = (int)($data['is_available'] ?? 0);
-        $statusStr  = is_array($data['status'] ?? null)
-        ? implode(' ', $data['status'])
-        : ($data['status'] ?? null);
-
-        $registrar          = $data['registrar'] ?? null;
-        $registrarUrl       = $data['registrar_url'] ?? null;
-        $registrantName     = $data['registrant_name'] ?? null;
-        $registrantOrg      = $data['registrant_org'] ?? null;
-        $registrantCountry  = $data['registrant_country'] ?? null;
-        $registrantEmail    = $data['registrant_email'] ?? null;
-        $createdDate        = $data['created_date'] ?? null;
-        $updatedDate        = $data['updated_date'] ?? null;
-        $expiryDate         = $data['expiry_date'] ?? null;
-        $dnssec             = $data['dnssec'] ?? null;
-        $rawResponse        = $data['raw'] ?? null;
-        $source             = $data['source'] ?? 'api';
-
-        $insStmt2->bind_param(
-        "isssssssssssssssiss",
-        $session['user_id'],
-        $domain,
-        $tld,
-        $creditCost,
-        $registrar,
-        $registrarUrl,
-        $registrantName,
-        $registrantOrg,
-        $registrantCountry,
-        $registrantEmail,
-        $createdDate,
-        $updatedDate,
-        $expiryDate,
-        $statusStr,
-        $nsJson,
-        $dnssec,
-        $isAvailInt,
-        $rawResponse,
-        $source
-        );
-        $insStmt2->execute();
-        $insStmt2->close();
-        echo "<script>console.log('test 1');</script>";
-        // ── Credit ledger entry ───────────────────────────
-        $balStmt = $conn->prepare("SELECT credits FROM users WHERE id=?");
-        $balStmt->bind_param("i", $session['user_id']);
-        $balStmt->execute();
-        $balAfter = (int)($balStmt->get_result()->fetch_assoc()['credits'] ?? $creditsAfter);
-        $balStmt->close();
-
-        $ledgerStmt = $conn->prepare("INSERT INTO credit_ledger (user_id, delta, balance_after, type, domain_name, note) VALUES (?,?,?,'whois_lookup',?,?)");
-        if ($ledgerStmt) {
-            $delta = -$creditCost;
-            $note  = "WHOIS lookup: {$domain}";
-            $ledgerStmt->bind_param("iiiss", $session['user_id'], $delta, $balAfter, $domain, $note);
-            $ledgerStmt->execute();
-            $ledgerStmt->close();
-        }
-
-        $data['from_cache']       = false;
-        $data['nameservers']      = $data['nameservers'] ?? [];
-        ob_end_clean();
-        echo json_encode(['success'=>true,'data'=>$data,'credits_remaining'=>$creditsAfter]);
-        exit();
-    }
-
-    ob_end_clean();
-    echo json_encode(['success'=>false,'message'=>'Unknown action.']);
-    exit();
-}
-
-// ── Fetch lookup history ───────────────────────────────────
-$histStmt = $conn->prepare("
-    SELECT id, domain_name, registrar, expiry_date, is_available, source, looked_up_at, credits_spent
-    FROM whois_lookups
-    WHERE user_id = ?
-    ORDER BY looked_up_at DESC
-    LIMIT 20
-");
-$histStmt->bind_param("i", $session['user_id']);
-$histStmt->execute();
-$histResult = $histStmt->get_result();
-$history = [];
-while ($row = $histResult->fetch_assoc()) { $history[] = $row; }
-$histStmt->close();
-
-// ── Sidebar counts ─────────────────────────────────────────
-$watchStmt = $conn->prepare("SELECT COUNT(*) as c FROM pinned_domains WHERE user_id=? AND status='active'");
-$watchStmt->bind_param("i", $session['user_id']); $watchStmt->execute();
-$watchlistCount = (int)$watchStmt->get_result()->fetch_assoc()['c']; $watchStmt->close();
-
-$alertCount = 0;
-$alStmt = $conn->prepare("SELECT COUNT(*) as c FROM domain_alerts WHERE user_id=? AND status='unread'");
-if ($alStmt) { $alStmt->bind_param("i", $session['user_id']); $alStmt->execute(); $alertCount = (int)$alStmt->get_result()->fetch_assoc()['c']; $alStmt->close(); }
-
-$conn->close();
-
-// ── User meta ──────────────────────────────────────────────
-$userName  = trim($user['full_name'] ?? '') ?: explode('@', $user['email'])[0];
-$firstName = explode(' ', $userName)[0];
-$initials  = strtoupper(substr($userName,0,1).(strpos($userName,' ')!==false?substr($userName,strpos($userName,' ')+1,1):''));
-$activePage = 'whois';
-
-// ── Pre-fill from query string ─────────────────────────────
-$prefill = htmlspecialchars(preg_replace('#^https?://(www\.)?#','', trim($_GET['domain'] ?? '')), ENT_QUOTES);
-
-// ═══════════════════════════════════════════════════════════
-// WHOIS LOOKUP FUNCTIONS
-// ═══════════════════════════════════════════════════════════
-function runWhoisLookup(string $domain, string $apiKey): array {
-    // Try WhoisXML API first if key is real
-    if ($apiKey && $apiKey !== 'at_Tum0rTrVQkxRo3NjRDgRxeWiJwXTN') {
-        $apiResult = whoisXmlApiLookup($domain, $apiKey);
-        if ($apiResult) return ['success'=>true,'data'=>$apiResult];
-    }
-    // Fallback: raw socket WHOIS
-    $socketResult = rawSocketWhois($domain);
-    if ($socketResult) return ['success'=>true,'data'=>$socketResult];
-
-    return ['success'=>false,'message'=>'Could not fetch WHOIS data. Please try again.'];
-}
-
-function whoisXmlApiLookup(string $domain, string $apiKey): ?array {
-    $url = 'https://www.whoisxmlapi.com/whoisserver/WhoisService?' . http_build_query([
-        'apiKey'       => $apiKey,
-        'domainName'   => $domain,
-        'outputFormat' => 'JSON',
-        'da'           => 2,
-    ]);
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 15,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_USERAGENT      => 'checkdomain/2.0',
-    ]);
-    $body     = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($httpCode !== 200 || !$body) return null;
-
-    $json = json_decode($body, true);
-    if (!$json || !isset($json['WhoisRecord'])) return null;
-
-    $r = $json['WhoisRecord'];
-
-    if (isset($r['dataError']) && $r['dataError'] === 'Not found') {
-        return ['is_available'=>true,'domain'=>$domain,'source'=>'api','raw'=>$body];
-    }
-
-    $registrant = $r['registrant'] ?? [];
-    $ns = [];
-    if (!empty($r['nameServers']['hostNames'])) $ns = $r['nameServers']['hostNames'];
-    elseif (!empty($r['nameServers']['rawText'])) {
-        $ns = array_filter(array_map('trim', explode("\n", $r['nameServers']['rawText'])));
-    }
-
-    $statusList = [];
-    if (!empty($r['status'])) {
-        $statusList = is_array($r['status']) ? $r['status'] : array_filter(array_map('trim', explode(' ', $r['status'])));
-    }
-
-    return [
-        'is_available'      => false,
-        'domain'            => $domain,
-        'registrar'         => $r['registrarName'] ?? null,
-        'registrar_url'     => $r['registrarIANAID'] ? "https://www.iana.org/assignments/registrar-ids/{$r['registrarIANAID']}" : null,
-        'registrant_name'   => $registrant['name'] ?? null,
-        'registrant_org'    => $registrant['organization'] ?? null,
-        'registrant_country'=> $registrant['country'] ?? null,
-        'registrant_email'  => $registrant['email'] ?? null,
-        'created_date'      => normalizeDate($r['createdDateNormalized'] ?? $r['createdDate'] ?? null),
-        'updated_date'      => normalizeDate($r['updatedDateNormalized'] ?? $r['updatedDate'] ?? null),
-        'expiry_date'       => normalizeDate($r['expiresDateNormalized'] ?? $r['expiresDate'] ?? null),
-        'status'            => $statusList,
-        'nameservers'       => array_values(array_unique(array_filter(array_map('strtolower', (array)$ns)))),
-        'dnssec'            => $r['dnssec'] ?? null,
-        'source'            => 'api',
-        'raw'               => substr($r['rawText'] ?? '', 0, 8000),
-    ];
-}
-
-function rawSocketWhois(string $domain): ?array {
-    $parts = explode('.', $domain);
-    $tld   = strtolower(end($parts));
-
-    $servers = [
-        'com'=>'whois.verisign-grs.com','net'=>'whois.verisign-grs.com',
-        'org'=>'whois.pir.org','io'=>'whois.nic.io','co'=>'whois.nic.co',
-        'dev'=>'whois.nic.dev','app'=>'whois.nic.app','ai'=>'whois.nic.ai',
-        'info'=>'whois.afilias.net','biz'=>'whois.neulevel.biz',
-        'ng'=>'whois.nic.net.ng','com.ng'=>'whois.nic.net.ng',
-        'uk'=>'whois.nic.uk','co.uk'=>'whois.nic.uk',
-        'de'=>'whois.denic.de','fr'=>'whois.afnic.fr',
-        'ca'=>'whois.cira.ca','au'=>'whois.auda.org.au',
-        'in'=>'whois.registry.in','xyz'=>'whois.nic.xyz',
-        'online'=>'whois.nic.online','site'=>'whois.nic.site',
-        'tech'=>'whois.nic.tech','store'=>'whois.nic.store',
-    ];
-
-    // Try multi-part TLD first (e.g. com.ng)
-    $tldKey = null;
-    if (count($parts) >= 3) {
-        $multiTld = strtolower($parts[count($parts)-2] . '.' . $parts[count($parts)-1]);
-        if (isset($servers[$multiTld])) $tldKey = $multiTld;
-    }
-    if (!$tldKey && isset($servers[$tld])) $tldKey = $tld;
-    if (!$tldKey) return null;
-
-    $server = $servers[$tldKey];
-    $sock   = @fsockopen($server, 43, $errno, $errstr, 10);
-    if (!$sock) return null;
-
-    fwrite($sock, $domain . "\r\n");
-    $raw = '';
-    while (!feof($sock)) $raw .= fgets($sock, 512);
-    fclose($sock);
-
-    if (!$raw) return null;
-
-    $available = (bool)preg_match('/No match|NOT FOUND|is available|Status: free|No entries found/i', $raw);
-
-    if ($available) return ['is_available'=>true,'domain'=>$domain,'source'=>'socket','raw'=>substr($raw,0,4000)];
-
-    $extract = fn($pattern) => (preg_match($pattern, $raw, $m)) ? trim($m[1]) : null;
-
-    $ns = [];
-    preg_match_all('/Name Server:\s*([^\s\n]+)/i', $raw, $nsMatches);
-    if (!empty($nsMatches[1])) $ns = array_unique(array_map('strtolower', $nsMatches[1]));
-
-    $statusRaw = [];
-    preg_match_all('/Domain Status:\s*([^\n]+)/i', $raw, $stMatches);
-    if (!empty($stMatches[1])) {
-        foreach ($stMatches[1] as $s) {
-            $clean = trim(explode(' ', trim($s))[0]);
-            if ($clean) $statusRaw[] = $clean;
-        }
-    }
-
-    return [
-        'is_available'       => false,
-        'domain'             => $domain,
-        'registrar'          => $extract('/Registrar:\s*([^\n]+)/i'),
-        'registrar_url'      => $extract('/Registrar URL:\s*([^\n]+)/i'),
-        'registrant_name'    => $extract('/Registrant Name:\s*([^\n]+)/i'),
-        'registrant_org'     => $extract('/Registrant Org(?:anization)?:\s*([^\n]+)/i'),
-        'registrant_country' => $extract('/Registrant Country:\s*([^\n]+)/i'),
-        'registrant_email'   => $extract('/Registrant Email:\s*([^\n]+)/i'),
-        'created_date'       => normalizeDate($extract('/Creation Date:\s*([^\n]+)/i')),
-        'updated_date'       => normalizeDate($extract('/Updated Date:\s*([^\n]+)/i')),
-        'expiry_date'        => normalizeDate($extract('/Expir(?:y|ation) Date:\s*([^\n]+)/i') ?? $extract('/Registry Expiry Date:\s*([^\n]+)/i')),
-        'status'             => array_unique($statusRaw),
-        'nameservers'        => array_values($ns),
-        'dnssec'             => $extract('/DNSSEC:\s*([^\n]+)/i'),
-        'source'             => 'socket',
-        'raw'                => substr($raw, 0, 6000),
-    ];
-}
-
-function normalizeDate(?string $d): ?string {
-    if (!$d) return null;
-    $d = trim(preg_replace('/T\d{2}:\d{2}:\d{2}.*$/', '', $d));
-    $ts = strtotime($d);
-    return $ts ? date('Y-m-d', $ts) : null;
-}
-?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -679,8 +225,347 @@ body::before{content:'';position:fixed;inset:0;
 
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
 
-<?php require_once 'includes/sidebar.php'; ?>
+<!-- ═══════════════════════════════════════════════════
+     SIDEBAR  —  includes/sidebar.php
+═══════════════════════════════════════════════════ -->
+<aside class="cd-sidebar" id="cdSidebar" aria-label="Main navigation">
 
+  <!-- Logo -->
+  <a href="/web/checkdomain/index.php" class="cd-sb-logo">
+    
+      <img src="/web/checkdomain/images/logo.png" alt="checkdomain.top logo" height="20px" >
+    
+    <span class="cd-sb-logo-text">CheckDomain</span>
+  </a>
+
+  <!-- Main nav -->
+  <div class="cd-sb-section-label">Main</div>
+  <nav class="cd-sb-nav" aria-label="Main">
+        <a href="/web/checkdomain/dashboard.php"
+       class="cd-sb-link "
+       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-th-large"></i></span>
+      Dashboard          </a>
+        <a href="/web/checkdomain/index.php"
+       class="cd-sb-link "
+       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-search"></i></span>
+      Search          </a>
+        <a href="/web/checkdomain/watchlist.php"
+       class="cd-sb-link "
+       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-bookmark"></i></span>
+      Watchlist              <span class="cd-sb-badge green">1</span>
+          </a>
+        <a href="/web/checkdomain/alerts.php"
+       class="cd-sb-link "
+       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-bell"></i></span>
+      Alerts          </a>
+        <a href="/web/checkdomain/backorders.php"
+       class="cd-sb-link "
+       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-clock"></i></span>
+      Backorders          </a>
+      </nav>
+
+  <!-- Services nav -->
+  <div class="cd-sb-section-label">Services</div>
+  <nav class="cd-sb-nav" aria-label="Services">
+        <a href="/web/checkdomain/whois.php"
+       class="cd-sb-link active "
+       aria-current="page"       >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-file-alt"></i></span>
+      WHOIS Lookup          </a>
+        <a href="/web/checkdomain/broker.php"
+       class="cd-sb-link  "
+              >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-handshake"></i></span>
+      Broker Service          </a>
+        <a href="/web/checkdomain/dead-sites.php"
+       class="cd-sb-link  "
+              >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-skull"></i></span>
+      Dead Sites          </a>
+        <a href="/web/checkdomain/billing.php"
+       class="cd-sb-link  "
+              >
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-credit-card"></i></span>
+      Billing          </a>
+      </nav>
+
+  <!-- Divider -->
+  <div class="cd-sb-divider" role="separator"></div>
+
+  <!-- System nav -->
+  <nav class="cd-sb-nav" aria-label="Account">
+    <a href="/web/checkdomain/account-settings.php"
+       class="cd-sb-link ">
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-cog"></i></span>
+      Settings
+    </a>
+    <a href="/web/checkdomain/logout.php" class="cd-sb-link cd-sb-link--danger">
+      <span class="cd-sb-icon" aria-hidden="true"><i class="fas fa-sign-out-alt"></i></span>
+      Logout
+    </a>
+  </nav>
+
+  <!-- Bottom -->
+  <div class="cd-sb-bottom">
+
+    <!-- Credits bar (always visible) -->
+    <div class="cd-sb-credits">
+      <div class="cd-sb-credits-row">
+        <span class="cd-sb-credits-label">Credits</span>
+        <span class="cd-sb-credits-value">678 <span class="cd-sb-credits-max">/ 100</span></span>
+      </div>
+      <div class="cd-sb-credits-bar-wrap" role="progressbar"
+           aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"
+           aria-label="Credits remaining">
+        <div class="cd-sb-credits-bar-fill "
+             style="width:100%"></div>
+      </div>
+    </div>
+
+    <!-- Upgrade strip — only for free users -->
+    
+    <!-- User card -->
+    <a href="/web/checkdomain/account-settings.php" class="cd-sb-user">
+      <div class="cd-sb-avatar" aria-hidden="true">AS</div>
+      <div class="cd-sb-user-info">
+        <div class="cd-sb-user-name">Alao</div>
+        <div class="cd-sb-user-plan">Pro plan</div>
+      </div>
+      <span class="cd-sb-user-caret" aria-hidden="true"><i class="fas fa-chevron-right"></i></span>
+    </a>
+
+  </div>
+</aside>
+
+<!-- ═══════════════════════════════════════════════════
+     SIDEBAR STYLES  (scoped with cd- prefix)
+═══════════════════════════════════════════════════ -->
+<style>
+/* ── Variables (mirrors dashboard design system) ───────── */
+.cd-sidebar {
+  --sb-bg:         #111318;
+  --sb-border:     rgba(255,255,255,0.06);
+  --sb-border2:    rgba(255,255,255,0.11);
+  --sb-text:       #E9E7DF;
+  --sb-text2:      #8A8880;
+  --sb-text3:      #454340;
+  --sb-bg3:        #181C24;
+  --sb-green:      #1D9E75;
+  --sb-green2:     #14C48A;
+  --sb-green-bg:   rgba(29,158,117,0.1);
+  --sb-amber:      #EF9F27;
+  --sb-amber-bg:   rgba(239,159,39,0.1);
+  --sb-coral:      #E8593C;
+  --sb-coral-bg:   rgba(232,89,60,0.1);
+  --sb-purple:     #7F77DD;
+  --sb-width:      224px;
+  --sb-display:    'Syne', sans-serif;
+  --sb-mono:       'DM Mono', monospace;
+}
+
+/* ── Layout ─────────────────────────────────────────────── */
+.cd-sidebar {
+  width: var(--sb-width);
+  flex-shrink: 0;
+  background: var(--sb-bg);
+  border-right: 1px solid var(--sb-border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 50;
+  padding: 22px 0 20px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: transform 0.25s ease;
+  scrollbar-width: thin;
+  scrollbar-color: var(--sb-border2) transparent;
+}
+.cd-sidebar::-webkit-scrollbar { width: 3px; }
+.cd-sidebar::-webkit-scrollbar-thumb { background: var(--sb-border2); border-radius: 2px; }
+
+/* ── Logo ───────────────────────────────────────────────── */
+.cd-sb-logo {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 20px 20px;
+  border-bottom: 1px solid var(--sb-border);
+  margin-bottom: 18px;
+  text-decoration: none;
+}
+.cd-sb-logo-mark {
+  width: 28px; height: 28px; border-radius: 7px;
+  background: var(--sb-green-bg);
+  border: 1px solid rgba(29,158,117,0.25);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; color: var(--sb-green2);
+}
+.cd-sb-logo-mark svg { width: 14px; height: 14px; }
+.cd-sb-logo-text {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--sb-text);
+  font-family: var(--sb-display);
+}
+
+/* ── Section labels ─────────────────────────────────────── */
+.cd-sb-section-label {
+  font-size: 10px; font-weight: 500; letter-spacing: 0.15em;
+  text-transform: uppercase; color: var(--sb-text3);
+  padding: 0 20px; margin-bottom: 5px;
+  font-family: var(--sb-display);
+}
+
+/* ── Nav ────────────────────────────────────────────────── */
+.cd-sb-nav {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 0 10px; margin-bottom: 18px;
+}
+.cd-sb-link {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 11px; border-radius: 7px;
+  font-size: 13px; color: var(--sb-text2);
+  text-decoration: none; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  position: relative; font-family: var(--sb-display);
+  white-space: nowrap; overflow: hidden;
+}
+.cd-sb-link:hover { background: var(--sb-bg3); color: var(--sb-text); }
+.cd-sb-link.active {
+  background: var(--sb-green-bg); color: var(--sb-green2);
+}
+.cd-sb-link.active::before {
+  content: '';
+  position: absolute; left: 0; top: 18%; bottom: 18%;
+  width: 2px; border-radius: 0 2px 2px 0;
+  background: var(--sb-green2);
+}
+.cd-sb-link.cd-sb-locked { opacity: 0.45; }
+.cd-sb-link.cd-sb-locked:hover { background: none; color: var(--sb-text2); cursor: not-allowed; }
+.cd-sb-link--danger { color: var(--sb-text3); }
+.cd-sb-link--danger:hover { background: var(--sb-coral-bg); color: var(--sb-coral); }
+
+.cd-sb-icon {
+  font-size: 13px; flex-shrink: 0;
+  width: 16px; text-align: center;
+}
+
+/* ── Badges ─────────────────────────────────────────────── */
+.cd-sb-badge {
+  margin-left: auto; font-size: 10px; font-weight: 700;
+  background: var(--sb-amber-bg); color: var(--sb-amber);
+  border-radius: 4px; padding: 1px 6px;
+  font-family: var(--sb-mono); flex-shrink: 0;
+}
+.cd-sb-badge.green { background: var(--sb-green-bg); color: var(--sb-green2); }
+
+.cd-sb-pro-lock {
+  margin-left: auto; font-size: 10px; color: var(--sb-text3);
+  flex-shrink: 0;
+}
+
+/* ── Divider ────────────────────────────────────────────── */
+.cd-sb-divider {
+  height: 1px; background: var(--sb-border);
+  margin: 4px 20px 14px;
+}
+
+/* ── Bottom stack ───────────────────────────────────────── */
+.cd-sb-bottom {
+  margin-top: auto;
+  padding: 0 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+/* Credits bar */
+.cd-sb-credits {
+  padding: 10px 12px;
+  background: var(--sb-bg3);
+  border: 1px solid var(--sb-border);
+  border-radius: 8px;
+}
+.cd-sb-credits-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 7px;
+}
+.cd-sb-credits-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--sb-text3); font-family: var(--sb-display);
+}
+.cd-sb-credits-value {
+  font-size: 12px; font-weight: 700; color: var(--sb-text);
+  font-family: var(--sb-mono);
+}
+.cd-sb-credits-max { font-weight: 400; color: var(--sb-text3); }
+.cd-sb-credits-bar-wrap {
+  height: 3px; background: var(--sb-border);
+  border-radius: 2px; overflow: hidden;
+}
+.cd-sb-credits-bar-fill {
+  height: 100%; border-radius: 2px;
+  background: var(--sb-green);
+  transition: width 0.6s ease;
+}
+.cd-sb-credits-bar-fill.mid  { background: var(--sb-amber); }
+.cd-sb-credits-bar-fill.low  { background: var(--sb-coral); }
+
+/* Upgrade strip */
+.cd-sb-upgrade {
+  display: block;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(29,158,117,0.1), rgba(127,119,221,0.06));
+  border: 1px solid rgba(29,158,117,0.18);
+  padding: 11px 13px;
+  text-decoration: none;
+  transition: border-color 0.2s;
+}
+.cd-sb-upgrade:hover { border-color: rgba(29,158,117,0.38); }
+.cd-sb-upgrade-label {
+  font-size: 10px; color: var(--sb-text3);
+  text-transform: uppercase; letter-spacing: 0.12em;
+  margin-bottom: 3px; font-family: var(--sb-display);
+}
+.cd-sb-upgrade-title {
+  font-size: 12px; font-weight: 700;
+  color: var(--sb-green2); margin-bottom: 2px;
+  font-family: var(--sb-display);
+}
+.cd-sb-upgrade-sub { font-size: 11px; color: var(--sb-text2); }
+
+/* User card */
+.cd-sb-user {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 11px; border-radius: 8px;
+  background: var(--sb-bg3); border: 1px solid var(--sb-border);
+  text-decoration: none; cursor: pointer;
+  transition: border-color 0.15s;
+}
+.cd-sb-user:hover { border-color: var(--sb-border2); }
+.cd-sb-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--sb-green), var(--sb-purple));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  flex-shrink: 0; font-family: var(--sb-display);
+}
+.cd-sb-user-info { flex: 1; min-width: 0; }
+.cd-sb-user-name {
+  font-size: 12px; font-weight: 500; color: var(--sb-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--sb-display);
+}
+.cd-sb-user-plan { font-size: 10px; color: var(--sb-green); font-family: var(--sb-mono); }
+.cd-sb-user-caret { font-size: 10px; color: var(--sb-text3); flex-shrink: 0; }
+
+/* ── Mobile ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .cd-sidebar { transform: translateX(-100%); }
+  .cd-sidebar.open { transform: translateX(0); }
+}
+</style>
 <main class="main">
 
   <!-- Topbar -->
@@ -688,7 +573,7 @@ body::before{content:'';position:fixed;inset:0;
     <div class="topbar-left">
       <button class="mobile-menu-btn" onclick="openSidebar()"><i class="fas fa-bars"></i></button>
       <div class="breadcrumb">
-        <a href="<?= htmlspecialchars($assetUrl('dashboard.php')) ?>">Dashboard</a>
+        <a href="/web/checkdomain/dashboard.php">Dashboard</a>
         <span style="color:var(--text3);font-size:9px;"><i class="fas fa-chevron-right"></i></span>
         <span style="color:var(--text);">WHOIS Lookup</span>
       </div>
@@ -696,9 +581,9 @@ body::before{content:'';position:fixed;inset:0;
     <div class="topbar-right">
       <div class="credits-pill" id="creditsPill">
         <i class="fas fa-bolt" style="color:var(--amber);font-size:11px;"></i>
-        <b id="creditsDisplay"><?= $credits ?></b> credits
+        <b id="creditsDisplay">678</b> credits
       </div>
-      <a href="<?= htmlspecialchars($assetUrl('billing.php?topup=1')) ?>" class="topbar-btn" title="Top up credits">
+      <a href="/web/checkdomain/billing.php?topup=1" class="topbar-btn" title="Top up credits">
         <i class="fas fa-plus"></i>
       </a>
     </div>
@@ -709,23 +594,11 @@ body::before{content:'';position:fixed;inset:0;
     <div class="page-title">WHOIS Lookup.</div>
     <div class="page-sub">
       Deep registrar data, expiry dates, nameservers, and ownership records.
-      <?php if ($canWhois): ?>
-        Each lookup costs <em><?= $creditCost ?> credits</em>. Results cached for 24 hours — repeat lookups are free.
-      <?php endif; ?>
-    </div>
+              Each lookup costs <em>3 credits</em>. Results cached for 24 hours — repeat lookups are free.
+          </div>
 
     <!-- Upgrade gate -->
-    <?php if (!$canWhois): ?>
-    <div class="upgrade-gate">
-      <div class="gate-icon">🔍</div>
-      <div class="gate-title">WHOIS requires a Pro plan</div>
-      <div class="gate-sub">Upgrade to unlock deep WHOIS data — registrar, expiry date, nameservers, registrant details, and EPP status codes for any domain.</div>
-      <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
-      </a>
-    </div>
-    <?php endif; ?>
-
+    
     <!-- Search hero -->
     <div class="search-hero">
       <div class="search-hero-label">
@@ -736,27 +609,20 @@ body::before{content:'';position:fixed;inset:0;
         <div class="search-input-wrap">
           <i class="fas fa-globe search-input-icon"></i>
           <input class="search-input" type="text" id="whoisInput"
-                 placeholder="<?= $canWhois ? 'Enter any domain — e.g. techlaunch.com, mybrand.ng' : 'Requires Pro plan' ?>"
-                 value="<?= $prefill ?>"
-                 <?= !$canWhois ? 'disabled' : '' ?>
-                 autocomplete="off" maxlength="253"
+                 placeholder="Enter any domain — e.g. techlaunch.com, mybrand.ng"
+                 value=""
+                                  autocomplete="off" maxlength="253"
                  onkeydown="if(event.key==='Enter')runLookup()">
         </div>
-        <button class="search-btn" id="searchBtn" onclick="runLookup()" <?= !$canWhois ? 'disabled' : '' ?>>
+        <button class="search-btn" id="searchBtn" onclick="runLookup()" >
           <i class="fas fa-search" style="font-size:11px;"></i> Lookup
         </button>
       </div>
       <div class="search-hint">
-        <span><span class="cost-pill"><?= $creditCost ?> credits</span> per lookup</span>
+        <span><span class="cost-pill">3 credits</span> per lookup</span>
         <span><span class="cache-pill">FREE</span> if cached within 24 hours</span>
         <span><i class="fas fa-info-circle"></i> Works for .com .net .org .io .ng .co.uk .de .fr and 20+ more TLDs</span>
-        <?php if ($credits < $creditCost && $canWhois): ?>
-        <span style="color:var(--coral);">
-          <i class="fas fa-exclamation-triangle"></i>
-          Low credits — <a href="<?= htmlspecialchars($assetUrl('billing.php?topup=1')) ?>" style="color:var(--amber);text-decoration:none;">top up</a> to run lookups.
-        </span>
-        <?php endif; ?>
-      </div>
+              </div>
     </div>
 
     <!-- Loading state -->
@@ -774,61 +640,14 @@ body::before{content:'';position:fixed;inset:0;
     <div class="result-panel" id="resultPanel"></div>
 
     <!-- Lookup history -->
-    <?php if (!empty($history)): ?>
-    <div class="history-wrap">
-      <div class="history-header">
-        <span class="history-title"><i class="fas fa-history" style="color:var(--green2);margin-right:6px;font-size:12px;"></i> Lookup history</span>
-        <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">Last <?= count($history) ?> lookups</span>
-      </div>
-      <div class="ht-head">
-        <div class="ht-th">Domain</div>
-        <div class="ht-th">Registrar</div>
-        <div class="ht-th">Expires</div>
-        <div class="ht-th">Status</div>
-        <div class="ht-th right">Credits</div>
-      </div>
-      <?php foreach ($history as $h):
-        $domParts = explode('.', $h['domain_name']);
-        $domSld   = $domParts[0];
-        $domTld   = '.' . implode('.', array_slice($domParts, 1));
-        $isAvail  = (bool)$h['is_available'];
-        $expiry   = $h['expiry_date'];
-        $expiryTs = $expiry ? strtotime($expiry) : null;
-        $daysLeft = $expiryTs ? (int)ceil(($expiryTs - time()) / 86400) : null;
-      ?>
-      <div class="ht-row" onclick="quickLoad('<?= htmlspecialchars($h['domain_name'], ENT_QUOTES) ?>')">
-        <div>
-          <div class="ht-domain"><?= htmlspecialchars($domSld) ?><span class="ht-domain-tld"><?= htmlspecialchars($domTld) ?></span></div>
-          <div style="font-size:10px;color:var(--text3);margin-top:2px;"><?= date('M j, Y · H:i', strtotime($h['looked_up_at'])) ?></div>
-        </div>
-        <div class="ht-registrar"><?= htmlspecialchars($h['registrar'] ?? '—') ?></div>
-        <div class="ht-date" style="<?= $daysLeft !== null && $daysLeft < 30 ? 'color:var(--coral)' : '' ?>">
-          <?php if ($expiry): ?>
-            <?= date('M j, Y', $expiryTs) ?>
-            <?php if ($daysLeft !== null && $daysLeft >= 0 && $daysLeft < 60): ?>
-            <span style="font-size:9px;color:<?= $daysLeft < 30 ? 'var(--coral)' : 'var(--amber)' ?>">· <?= $daysLeft ?>d</span>
-            <?php endif; ?>
-          <?php else: ?><span style="color:var(--text3);">—</span><?php endif; ?>
-        </div>
-        <div>
-          <span class="ht-status-pill <?= $isAvail ? 'hsp-available' : 'hsp-taken' ?>">
-            <?= $isAvail ? 'Available' : 'Registered' ?>
-          </span>
-        </div>
-        <div class="ht-credits">−<?= (int)$h['credits_spent'] ?></div>
-      </div>
-      <?php endforeach; ?>
-    </div>
-    <?php elseif ($canWhois): ?>
-    <div class="history-wrap">
+        <div class="history-wrap">
       <div class="history-header"><span class="history-title">Lookup history</span></div>
       <div class="hist-empty">
         <i class="fas fa-history" style="font-size:20px;margin-bottom:10px;display:block;opacity:.3;"></i>
         Your WHOIS lookups will appear here.
       </div>
     </div>
-    <?php endif; ?>
-
+    
   </div>
 </main>
 
@@ -839,9 +658,9 @@ body::before{content:'';position:fixed;inset:0;
 </div>
 
 <script>
-const API_URL   = window.location.pathname;
-const APP_BASE  = <?= json_encode($appBasePath ?? '') ?>;
-const CAN_WHOIS = <?= $canWhois ? 'true' : 'false' ?>;
+const API_URL   = " window.location.pathname";
+const APP_BASE  = "\/web\/checkdomain";
+const CAN_WHOIS = true;
 
 // ── Run lookup ─────────────────────────────────────────────
 async function runLookup() {
@@ -858,28 +677,11 @@ async function runLookup() {
   btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:11px;"></i> Looking up…';
 
   try {
-    const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest'
-    },
-    body: JSON.stringify({
-        action: 'lookup',
-        domain: val
-    })
-});
-
-const text = await res.text();
-
-console.log('Response:', text);
-
-try {
-    const data = JSON.parse(text);
-    console.log(data);
-} catch (e) {
-    console.error('Invalid JSON:', text);
-}
+    const res  = await fetch(API_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body:    JSON.stringify({ action: 'lookup', domain: val }),
+    });
     const data = await res.json();
 
     hideLoading();
@@ -899,9 +701,10 @@ try {
     } else {
       showToast(data.message || 'Lookup failed. Try again.', 'error');
     }
-  } catch {
+  } catch (err) {
+    console.error('WHOIS lookup failed:', err);
     hideLoading();
-    showToast('Network error. Please try again.', 'error');
+    showToast(err.message || 'Network error. Please try again.', 'error');
   } finally {
     btn.disabled  = false;
     btn.innerHTML = '<i class="fas fa-search" style="font-size:11px;"></i> Lookup';

@@ -846,8 +846,8 @@ body::before{content:'';position:fixed;inset:0;
                   $cls   = match($state) { 2=>'done', 1=>'active', 3=>'declined', default=>'' };
                   $icon  = match($state) { 2=>'fa-check', 3=>'fa-times', 1=>'fa-circle', default=>'' };
                 ?>
-                <div class="ps-step <?= $cls ?>">
-                  <div class="ps-dot"><?php if ($icon): ?><i class="fas <?= $icon ?>" style="font-size:7px;"></i><?php endif; ?></div>
+                <div class="ps-step <?= $cls ?>" >
+                  <div class="ps-dot" style="background:#111;"><?php if ($icon): ?><i class="fas <?= $icon ?>" style="font-size:7px;"></i><?php endif; ?></div>
                   <div class="ps-label"><?= $tlLabel ?></div>
                 </div>
                 <?php endforeach; ?>

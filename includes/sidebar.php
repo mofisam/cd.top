@@ -241,7 +241,7 @@ $servicesNav = [
 }
 .cd-sb-logo-mark svg { width: 14px; height: 14px; }
 .cd-sb-logo-text {
-  font-size: 13px; font-weight: 800; letter-spacing: 0.12em;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.12em;
   text-transform: uppercase; color: var(--sb-text);
   font-family: var(--sb-display);
 }
