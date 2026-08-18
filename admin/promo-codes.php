@@ -50,7 +50,8 @@ $conn->query("
 ");
 
 // ── Helpers ────────────────────────────────────────────────
-$kobo    = fn(int $k): string => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo    = fn(int $k): string => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 $flash   = null;
 
 // ── POST actions ────────────────────────────────────────────
@@ -72,8 +73,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                           ? ($_POST['applies_to_plan'] ?: null) : null;
         $appBilling     = in_array($_POST['applies_to_billing'] ?? '', ['monthly','yearly','both'])
                           ? $_POST['applies_to_billing'] : 'both';
-        $minPurchaseNgn = max(0, (int)($_POST['min_purchase_ngn'] ?? 0));
-        $minKobo        = $minPurchaseNgn * 100;
+        if ($type === 'amount_off') {
+            $value = (int)round($value * 100);
+        }
+        $minPurchaseNgn = max(0, (float)($_POST['min_purchase_ngn'] ?? 0));
+        $minKobo        = (int)round($minPurchaseNgn * 100);
         $newOnly        = isset($_POST['new_users_only']) ? 1 : 0;
         $onePerUser     = isset($_POST['one_per_user'])   ? 1 : 0;
         $maxUses        = (trim($_POST['max_uses'] ?? '') === '') ? null : max(1, (int)$_POST['max_uses']);
@@ -192,7 +196,7 @@ if (isset($_GET['export'])) {
     header('Content-Type: text/csv');
     header('Content-Disposition: attachment; filename="promo_codes_'.date('Y-m-d').'.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['ID','Code','Description','Type','Value','Applies To Plan','Billing','Min Purchase (₦)','New Users Only','One Per User','Max Uses','Uses Count','Valid From','Valid Until','Active','Created By','Created At']);
+    fputcsv($out, ['ID','Code','Description','Type','Value','Applies To Plan','Billing','Min Purchase ($)','New Users Only','One Per User','Max Uses','Uses Count','Valid From','Valid Until','Active','Created By','Created At']);
     $rs = $conn->query("
         SELECT p.id, p.code, p.description, p.type, p.value,
                p.applies_to_plan, p.applies_to_billing,
@@ -314,7 +318,7 @@ function pcSortIcon(string $col): string {
 function promoValueLabel(string $type, float $value, $conn = null): string {
     return match($type) {
         'percent_off'  => number_format($value, 0) . '% off',
-        'amount_off'   => '₦' . number_format($value / 100, 0, '.', ',') . ' off',
+        'amount_off'   => '$' . number_format($value / 100, 0, '.', ',') . ' off',
         'free_credits' => number_format($value, 0) . ' free credits',
         'free_trial'   => number_format($value, 0) . ' extra days',
         default        => (string)$value,
@@ -609,7 +613,7 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
               <span class="badge b-<?= $promo['type'] ?>">
                 <?= match($promo['type']) {
                   'percent_off'  => '% Off',
-                  'amount_off'   => '₦ Off',
+                  'amount_off'   => '$ Off',
                   'free_credits' => 'Credits',
                   'free_trial'   => 'Trial',
                   default        => $promo['type'],
@@ -818,7 +822,7 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
           <label class="form-label">Type <span class="text-red-400">*</span></label>
           <select class="inp" name="type" id="f-type" onchange="updateValueLabel()">
             <option value="percent_off">% Off subscription</option>
-            <option value="amount_off">₦ Amount off</option>
+            <option value="amount_off">$ Amount off</option>
             <option value="free_credits">Free credits</option>
             <option value="free_trial">Free trial days</option>
           </select>
@@ -854,10 +858,10 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
           </select>
         </div>
         <div>
-          <label class="form-label">Min purchase (₦)</label>
+          <label class="form-label">Min purchase ($)</label>
           <input class="inp" type="number" name="min_purchase_ngn" id="f-min"
-                 min="0" step="1" value="0" placeholder="0 = no minimum">
-          <p class="form-hint">Enter in Naira, not kobo.</p>
+                 min="0" step="0.01" value="0" placeholder="0 = no minimum">
+          <p class="form-hint">Enter in dollars, stored as cents.</p>
         </div>
       </div>
 
@@ -1002,10 +1006,10 @@ function openEditModal(p) {
 
   document.getElementById('f-code').value        = p.code;
   document.getElementById('f-type').value        = p.type;
-  document.getElementById('f-value').value       = p.value;
+  document.getElementById('f-value').value       = p.type === 'amount_off' ? (Number(p.value || 0) / 100) : p.value;
   document.getElementById('f-plan').value        = p.applies_to_plan || '';
   document.getElementById('f-billing').value     = p.applies_to_billing;
-  document.getElementById('f-min').value         = Math.round(p.min_purchase_kobo / 100);
+  document.getElementById('f-min').value         = Number(p.min_purchase_kobo || 0) / 100;
   document.getElementById('f-maxuses').value     = p.max_uses || '';
   document.getElementById('f-description').value = p.description || '';
   document.getElementById('f-from').value        = fmtDt(p.valid_from);
@@ -1026,7 +1030,7 @@ function updateValueLabel() {
   const input = document.getElementById('f-value');
   const map = {
     percent_off:   { lbl:'Discount %',         hint:'0–100. e.g. 20 = 20% off.',          step:'1',  max:'100' },
-    amount_off:    { lbl:'Amount off (kobo)',   hint:'In kobo. e.g. 900000 = ₦9,000 off.', step:'100',max:''    },
+    amount_off:    { lbl:'Amount off ($)',      hint:'In dollars. e.g. 9 = $9 off.', step:'0.01',max:''    },
     free_credits:  { lbl:'Credits to grant',   hint:'Number of credits added to balance.',  step:'1',  max:''    },
     free_trial:    { lbl:'Extra trial days',    hint:'Days added to free trial period.',     step:'1',  max:''    },
   };
@@ -1182,7 +1186,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'uses') {
         echo '<div class="text-xs text-gray-500 mb-3">Last ' . count($uses) . ' redemption' . (count($uses)!==1?'s':'') . '</div>';
         echo '<div class="overflow-x-auto"><table class="w-full text-xs"><thead class="text-gray-500 uppercase border-b border-gray-700"><tr><th class="pb-2 text-left">User</th><th class="pb-2 text-left">Payment ref</th><th class="pb-2 text-right">Discount</th><th class="pb-2 text-right">Date</th></tr></thead><tbody class="divide-y divide-gray-700/50">';
         foreach ($uses as $u) {
-            $discount = '₦' . number_format($u['discount_kobo']/100, 0, '.', ',');
+            $discount = '$' . number_format($u['discount_kobo']/100, 0, '.', ',');
             $ref      = $u['paystack_reference'] ? htmlspecialchars(substr($u['paystack_reference'],0,20)).'…' : '—';
             $name     = htmlspecialchars($u['full_name'] ?: $u['email']);
             $date     = date('M j, Y H:i', strtotime($u['used_at']));

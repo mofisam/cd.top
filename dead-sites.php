@@ -3,8 +3,9 @@ error_reporting(E_ALL);
 ini_set('display_errors', 0); // Don't display errors to browser
 ini_set('log_errors', 1);
 
-// Before outputting JSON, clean any buffered content:
-ob_clean(); // Instead of ob_end_clean()
+// Start buffering immediately so any stray whitespace, BOM, or warning
+// emitted by an included file can never leak into a JSON response below.
+ob_start();
 
 session_start();
 require_once 'lib/Auth.php';
@@ -98,7 +99,13 @@ $canScan   = ($userPlan !== 'free');
 // ── Handle AJAX ────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
     header('Content-Type: application/json');
-    ob_start();
+    set_exception_handler(function (Throwable $e): void {
+        error_log('[dead-sites] AJAX fatal: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        http_response_code(500);
+        echo json_encode(['success'=>false,'message'=>'Server error while scanning. Check the PHP error log for details.']);
+        exit();
+    });
 
     $input  = json_decode(file_get_contents('php://input'), true) ?? [];
     $action = $input['action'] ?? '';
@@ -118,18 +125,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
             ob_end_clean(); echo json_encode(['success'=>false,'message'=>'Enter a valid domain name.']); exit();
         }
 
-        // Cache — if scanned in last 6 hours, return cached
+        // Cache — if THIS user scanned the same domain in the last 6 hours, return cached.
+        // Scoped to user_id so one user's scan never leaks into another user's result.
         $cacheStmt = $conn->prepare("
             SELECT * FROM dead_site_scans
-            WHERE domain_name=? AND scanned_at > DATE_SUB(NOW(), INTERVAL 6 HOUR)
+            WHERE domain_name=? AND user_id=? AND scanned_at > DATE_SUB(NOW(), INTERVAL 6 HOUR)
             ORDER BY scanned_at DESC LIMIT 1
         ");
-        $cacheStmt->bind_param("s", $domain);
+        $cacheStmt->bind_param("si", $domain, $session['user_id']);
         $cacheStmt->execute();
         $cached = $cacheStmt->get_result()->fetch_assoc();
         $cacheStmt->close();
 
-        if ($cached) {
+        // Never reuse a cached row that itself represents a failed/inconclusive
+        // scan (no_response, dns_fail, ssl_error with no http_status) — always
+        // re-scan those fresh rather than repeating a stale failure.
+        $cacheIsUsable = $cached
+            && (int)($cached['http_status'] ?? 0) > 0
+            && !in_array($cached['site_status'] ?? '', ['no_response', 'dns_fail'], true);
+
+        if ($cacheIsUsable) {
             $cached['from_cache']  = true;
             $cached['cached_age']  = round((time() - strtotime($cached['scanned_at'])) / 60) . 'm ago';
             ob_end_clean();
@@ -166,7 +181,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
                page_title, credits_spent)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ");
-        $insStmt->bind_param("issiisissssiiiiiisi",
+        if (!$insStmt) {
+            error_log("[dead-sites] insert prepare failed: " . $conn->error);
+            $conn->query("UPDATE users SET credits = credits + {$creditCost} WHERE id=" . (int)$session['user_id']);
+            ob_end_clean();
+            echo json_encode(['success'=>false,'message'=>'Scan completed, but saving the result failed. Your credits were refunded.']);
+            exit();
+        }
+        $insStmt->bind_param("issiisiissssiiiiisi",
             $session['user_id'], $domain, $tld,
             $result['http_status'], $result['response_time_ms'], $result['final_url'],
             $result['redirect_count'], $result['ssl_valid'], $result['ssl_expiry_date'],
@@ -175,7 +197,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
             $result['has_content'], $result['is_parked'], $result['is_for_sale'],
             $result['page_title'], $creditCost
         );
-        $insStmt->execute();
+        if (!$insStmt->execute()) {
+            error_log("[dead-sites] insert execute failed for {$domain}: " . $insStmt->error);
+            $insStmt->close();
+            $conn->query("UPDATE users SET credits = credits + {$creditCost} WHERE id=" . (int)$session['user_id']);
+            ob_end_clean();
+            echo json_encode(['success'=>false,'message'=>'Scan completed, but saving the result failed. Your credits were refunded.']);
+            exit();
+        }
         $insStmt->close();
 
         // Ledger
@@ -315,72 +344,155 @@ function runDeadSiteScan(string $domain): array {
         'is_parked'        => 0,
         'is_for_sale'      => 0,
         'page_title'       => null,
+        'scan_error'       => null, // diagnostic only — not persisted to DB
     ];
 
+    // ── XAMPP/Windows fix: ensure cURL has a usable CA bundle ──────────
+    // On stock XAMPP installs, php.ini's curl.cainfo is often empty/unset,
+    // which makes every HTTPS request fail with CURLE_SSL_CACERT (60) —
+    // even though CURLOPT_SSL_VERIFYPEER is false, some libcurl/OpenSSL
+    // builds still need a valid store to complete the handshake.
+    $caBundle = ini_get('curl.cainfo') ?: ini_get('openssl.cafile');
+    if (!$caBundle || !is_file($caBundle)) {
+        $bundledCacert = __DIR__ . '/lib/cacert.pem';
+        if (is_file($bundledCacert)) {
+            $caBundle = $bundledCacert;
+        } else {
+            $caBundle = null;
+        }
+    }
+
     $url = 'https://' . $domain;
-    $start = microtime(true);
+    $curlFetch = function (string $targetUrl, int $timeout, int $connectTimeout) use ($caBundle): array {
+        $start = microtime(true);
+        $ch = curl_init();
+        $opts = [
+            CURLOPT_URL            => $targetUrl,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => $timeout,
+            CURLOPT_CONNECTTIMEOUT => $connectTimeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
+            CURLOPT_PROXY          => '',
+            CURLOPT_NOPROXY        => '*',
+            CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; CheckDomainBot/2.0)',
+            CURLOPT_HEADER         => false,
+            CURLOPT_NOBODY         => false,
+        ];
+        if ($caBundle) { $opts[CURLOPT_CAINFO] = $caBundle; }
+        curl_setopt_array($ch, $opts);
 
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL            => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 12,
-        CURLOPT_CONNECTTIMEOUT => 8,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 10,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; CheckDomainBot/2.0)',
-        CURLOPT_HEADER         => false,
-        CURLOPT_NOBODY         => false,
-    ]);
+        $body  = curl_exec($ch);
+        $info  = curl_getinfo($ch);
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
 
-    $body     = curl_exec($ch);
-    $info     = curl_getinfo($ch);
-    $errno    = curl_errno($ch);
-    $error    = curl_error($ch);
-    curl_close($ch);
+        return [
+            'body'    => $body,
+            'info'    => $info,
+            'errno'   => $errno,
+            'error'   => $error,
+            'elapsed' => (int)round((microtime(true) - $start) * 1000),
+        ];
+    };
 
-    $elapsed = (int)round((microtime(true) - $start) * 1000);
-    $result['response_time_ms'] = $elapsed;
+    $scan = $curlFetch($url, 12, 8);
+    $body  = $scan['body'];
+    $info  = $scan['info'];
+    $errno = $scan['errno'];
+    $error = $scan['error'];
+    $result['response_time_ms'] = $scan['elapsed'];
+    $curlErrnos = static function (array $constantNames, array $fallbacks = []): array {
+        $values = $fallbacks;
+        foreach ($constantNames as $name) {
+            if (defined($name)) {
+                $values[] = constant($name);
+            }
+        }
+        return array_values(array_unique(array_map('intval', $values)));
+    };
 
-    // DNS failure
-    if (in_array($errno, [CURLE_COULDNT_RESOLVE_HOST, CURLE_COULDNT_RESOLVE_PROXY])) {
+    $dnsErrnos = $curlErrnos(['CURLE_COULDNT_RESOLVE_HOST', 'CURLE_COULDNT_RESOLVE_PROXY']);
+    $sslErrnos = $curlErrnos([
+        'CURLE_SSL_CONNECT_ERROR',
+        'CURLE_PEER_FAILED_VERIFICATION',
+        'CURLE_SSL_CACERT',
+        'CURLE_SSL_CACERT_BADFILE',
+    ], [35, 60, 77]);
+
+    if ($errno !== 0) {
+        $result['scan_error'] = "cURL error {$errno}: {$error}";
+        error_log("[dead-sites] {$domain} -> cURL error {$errno}: {$error}");
+    }
+
+    // Some live sites are HTTP-only or have broken HTTPS. Try HTTP before
+    // deciding the site has no response.
+    if ($errno !== 0 && !in_array($errno, $dnsErrnos, true)) {
+        $fallback = $curlFetch('http://' . $domain, 10, 6);
+        $fallbackCode = (int)($fallback['info']['http_code'] ?? 0);
+
+        if ($fallbackCode > 0) {
+            $body  = $fallback['body'];
+            $info  = $fallback['info'];
+            $errno = 0;
+            $error = '';
+            $result['response_time_ms'] += $fallback['elapsed'];
+            if (in_array($scan['errno'], $sslErrnos, true)) {
+                $result['ssl_valid'] = 0;
+            }
+        } else {
+            $result['scan_error'] .= " | HTTP fallback failed: cURL {$fallback['errno']}: {$fallback['error']}";
+            error_log("[dead-sites] {$domain} -> HTTP fallback error {$fallback['errno']}: {$fallback['error']}");
+        }
+    }
+
+    // DNS failure means the domain genuinely does not resolve.
+    if (in_array($errno, $dnsErrnos, true)) {
         $result['site_status'] = 'dns_fail';
         $result['dead_score']  = 95;
         return $result;
     }
 
-    // SSL error — try HTTP fallback
-    if (in_array($errno, [CURLE_SSL_CONNECT_ERROR, CURLE_PEER_FAILED_VERIFICATION]) || $errno === 35) {
+    // SSL error — try HTTP fallback before giving up
+    if (in_array($errno, $sslErrnos, true) || $errno === 35 || $errno === 60) {
         $result['ssl_valid'] = 0;
-        // Try HTTP
         $chHttp = curl_init();
-        curl_setopt_array($chHttp, [
+        $httpOpts = [
             CURLOPT_URL            => 'http://' . $domain,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 8,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_MAXREDIRS      => 5,
+            CURLOPT_PROXY          => '',
+            CURLOPT_NOPROXY        => '*',
             CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; CheckDomainBot/2.0)',
-        ]);
-        $body2 = curl_exec($chHttp);
-        $info2 = curl_getinfo($chHttp);
+        ];
+        curl_setopt_array($chHttp, $httpOpts);
+        $body2  = curl_exec($chHttp);
+        $info2  = curl_getinfo($chHttp);
+        $errno2 = curl_errno($chHttp);
+        $error2 = curl_error($chHttp);
         curl_close($chHttp);
-        if ($info2['http_code'] > 0) {
-            $body = $body2;
-            $info = $info2;
+
+        if (($info2['http_code'] ?? 0) > 0) {
+            $body  = $body2;
+            $info  = $info2;
+            $errno = 0; // recovered — let normal classification continue below
             $result['site_status'] = 'ssl_error';
             $result['dead_score']  = 30;
         } else {
             $result['site_status'] = 'ssl_error';
             $result['dead_score']  = 60;
+            $result['scan_error']  = ($result['scan_error'] ?? '') . " | HTTP fallback also failed: cURL {$errno2}: {$error2}";
             return $result;
         }
     }
 
-    // Timeout / no response
-    if ($errno === CURLE_OPERATION_TIMEDOUT || $info['http_code'] === 0) {
+    // Timeout / no response (only after DNS + SSL branches have been ruled out)
+    if ($errno === CURLE_OPERATION_TIMEDOUT || ($info['http_code'] ?? 0) === 0) {
         $result['site_status'] = 'no_response';
         $result['dead_score']  = 85;
         return $result;
@@ -392,17 +504,24 @@ function runDeadSiteScan(string $domain): array {
     $result['redirect_count'] = (int)($info['redirect_count'] ?? 0);
     $result['server_header']  = null; // populated below via separate HEAD
 
-    // Grab headers separately
+    // Grab headers separately — use final_url so this respects an HTTP fallback
+    // (re-hitting the original https:// URL here would just fail again).
+    $headerCheckUrl = $result['final_url'] ?: $url;
     $chHead = curl_init();
-    curl_setopt_array($chHead, [
-        CURLOPT_URL            => $url,
+    $headOpts = [
+        CURLOPT_URL            => $headerCheckUrl,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 6,
         CURLOPT_NOBODY         => true,
         CURLOPT_HEADER         => true,
         CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_PROXY          => '',
+        CURLOPT_NOPROXY        => '*',
         CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; CheckDomainBot/2.0)',
-    ]);
+    ];
+    if ($caBundle) { $headOpts[CURLOPT_CAINFO] = $caBundle; }
+    curl_setopt_array($chHead, $headOpts);
     $headerStr = curl_exec($chHead);
     curl_close($chHead);
 
@@ -789,7 +908,7 @@ function runDeadSiteScan(string $domain): array {
         Upgrade to Pro to check if any domain's website is live, dead, parked, or actively for sale — and instantly backorder the ones with inactive sites.
       </div>
       <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
+        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — $9/mo
       </a>
     </div>
     <?php endif; ?>
@@ -932,7 +1051,7 @@ function runDeadSiteScan(string $domain): array {
         <div class="ht-score right" style="color:<?= $scoreColor ?>">
           <?= (int)$h['dead_score'] ?>
         </div>
-        <div class="ht-time"><?= timeAgo($h['scanned_at']) ?></div>
+        <div class="ht-time"> -<?= timeAgo($h['scanned_at']) ?></div>
       </div>
       <?php endforeach; ?>
 
@@ -975,8 +1094,7 @@ async function runScan(domainOverride) {
   btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:11px;"></i> Scanning…';
 
   try {
-    const res  = await post({ action: 'scan', domain: val });
-    const data = await res.json();
+    const data = await post({ action: 'scan', domain: val });
     hideLoading();
 
     if (data.success) {
@@ -991,9 +1109,10 @@ async function runScan(domainOverride) {
     } else {
       showToast(data.message || 'Scan failed.', 'error');
     }
-  } catch {
+  } catch (err) {
+    console.error('Dead-site scan failed:', err);
     hideLoading();
-    showToast('Network error. Try again.', 'error');
+    showToast(err?.message || 'Network error. Try again.', 'error');
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-skull" style="font-size:11px;"></i> Check site';
@@ -1044,8 +1163,7 @@ async function startBatchScan() {
     list.scrollTop = list.scrollHeight;
 
     try {
-      const res  = await post({ action: 'scan', domain });
-      const data = await res.json();
+      const data = await post({ action: 'scan', domain });
       const r = data.data;
 
       const isDead = r?.is_dead;
@@ -1060,7 +1178,8 @@ async function startBatchScan() {
         ${isDead ? `<a href="${APP_BASE}/backorders.php?domain=${encodeURIComponent(domain)}" style="font-size:10px;font-family:var(--display);font-weight:700;color:var(--amber);margin-left:auto;text-decoration:none;text-transform:uppercase;">Backorder</a>` : ''}
       `;
       if (data.credits_remaining !== undefined) updateCredits(data.credits_remaining);
-    } catch {
+    } catch (err) {
+      console.error('Batch dead-site scan failed:', err);
       row.innerHTML = `<div class="batch-result-icon bri-dead"><i class="fas fa-times"></i></div><span class="batch-result-domain">${escHtml(domain)}</span><span style="font-size:11px;color:var(--text3);">Error</span>`;
     }
 
@@ -1214,12 +1333,27 @@ function updateCredits(val) {
   if (el) el.textContent = val;
 }
 
-function post(body) {
-  return fetch(API_URL, {
+async function post(body) {
+  const res = await fetch(API_URL, {
     method:'POST',
     headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
     body: JSON.stringify(body)
   });
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (err) {
+    console.error('Invalid scan response:', text);
+    throw new Error(`Server returned invalid response (${res.status}).`);
+  }
+
+  if (!res.ok) {
+    throw new Error(data.message || `Request failed (${res.status}).`);
+  }
+
+  return data;
 }
 
 function escHtml(s) {

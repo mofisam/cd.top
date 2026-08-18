@@ -33,6 +33,7 @@ $newUsers          = $safeFetch("SELECT COUNT(*) as c FROM users WHERE DATE(crea
 $pendingBackorders = $safeFetch("SELECT COUNT(*) as c FROM backorders WHERE status IN ('pending','watching')");
 $pendingBroker     = $safeFetch("SELECT COUNT(*) as c FROM broker_requests WHERE status IN ('submitted','researching','outreach','negotiating')");
 $pendingRefunds    = $safeFetch("SELECT COUNT(*) as c FROM refunds WHERE status='pending'");
+$pendingDomainReports = $safeFetch("SELECT COUNT(*) as c FROM domain_reports WHERE status='pending'");
 $unreadAlerts      = $safeFetch("SELECT COUNT(*) as c FROM domain_alerts WHERE status='unread'");
 
 // Total unread badge for topbar
@@ -57,6 +58,7 @@ $navGroups = [
         ['id'=>'users',            'label'=>'Users',           'icon'=>'fa-users',          'href'=>'users.php',       'badge'=>$newUsers,    'badge_class'=>'green', 'badge_title'=>'New this week'],
         ['id'=>'subscriptions',    'label'=>'Subscriptions',   'icon'=>'fa-credit-card',    'href'=>'subscriptions.php'],
         ['id'=>'payments',         'label'=>'Payments',        'icon'=>'fa-money-bill-wave', 'href'=>'payments.php'],
+        ['id'=>'credit-packages',  'label'=>'Credit top-ups',  'icon'=>'fa-coins',           'href'=>'credit-packages.php'],
         ['id'=>'refunds',          'label'=>'Refunds',         'icon'=>'fa-undo',           'href'=>'refunds.php',     'badge'=>$pendingRefunds, 'badge_class'=>'amber'],
         ['id'=>'promo-codes',      'label'=>'Promo codes',     'icon'=>'fa-tags',           'href'=>'promo-codes.php'],
     ],
@@ -67,6 +69,7 @@ $navGroups = [
         ['id'=>'domains',          'label'=>'Watchlist',       'icon'=>'fa-bookmark',       'href'=>'watchlist.php'],
         ['id'=>'dead-sites',       'label'=>'Dead site scans', 'icon'=>'fa-skull',          'href'=>'dead-sites.php'],
         ['id'=>'whois',            'label'=>'WHOIS lookups',   'icon'=>'fa-search',         'href'=>'whois.php'],
+        ['id'=>'domain-reports',   'label'=>'Domain Reports',  'icon'=>'fa-file-lines',     'href'=>'domain-reports.php', 'badge'=>$pendingDomainReports, 'badge_class'=>'amber'],
         ['id'=>'alerts',           'label'=>'Alerts',          'icon'=>'fa-bell',           'href'=>'alerts.php',      'badge'=>$unreadAlerts, 'badge_class'=>'amber'],
     ],
 

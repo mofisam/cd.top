@@ -47,7 +47,8 @@ $conn->query("
 ");
 
 // ── Helpers ──────────────────────────────────────────────────
-$kobo  = fn(int $k): string  => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo  = fn(int $k): string  => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 $flash = null;
 
 $allStatuses = ['submitted','researching','outreach','negotiating','offer_made','accepted','transfer','completed','declined','canceled','on_hold'];
@@ -187,7 +188,7 @@ if (isset($_GET['export'])) {
     header('Content-Type: text/csv');
     header('Content-Disposition: attachment; filename="broker_requests_'.date('Y-m-d').'.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['ID','User ID','Email','Domain','TLD','Budget (₦)','Flexible','Purpose','Urgency','Status','Agreed Price (₦)','Broker Fee (₦)','Commission %','Assigned To','Created','Updated']);
+    fputcsv($out, ['ID','User ID','Email','Domain','TLD','Budget ($)','Flexible','Purpose','Urgency','Status','Agreed Price ($)','Broker Fee ($)','Commission %','Assigned To','Created','Updated']);
     $rs = $conn->query("
         SELECT r.id, r.user_id, u.email, r.domain_name, r.tld,
                r.budget_kobo/100, r.budget_flexible, r.purpose, r.urgency, r.status,
@@ -768,15 +769,15 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       <!-- Pricing -->
       <div class="grid grid-cols-3 gap-3">
         <div>
-          <label class="form-label">Agreed price (₦)</label>
+          <label class="form-label">Agreed price ($)</label>
           <input class="inp" type="number" name="agreed_price_ngn" id="em-agreed"
-                 min="0" step="1" placeholder="e.g. 500000">
-          <p class="form-hint">In Naira, not kobo.</p>
+                 min="0" step="0.01" placeholder="e.g. 5000">
+          <p class="form-hint">In dollars, stored as cents.</p>
         </div>
         <div>
-          <label class="form-label">Broker fee (₦)</label>
+          <label class="form-label">Broker fee ($)</label>
           <input class="inp" type="number" name="broker_fee_ngn" id="em-fee"
-                 min="0" step="1" placeholder="e.g. 75000">
+                 min="0" step="0.01" placeholder="e.g. 750">
         </div>
         <div>
           <label class="form-label">Commission %</label>
@@ -863,7 +864,8 @@ document.querySelectorAll('.modal-backdrop').forEach(m => {
 // ── Edit modal ────────────────────────────────────────────
 function openEditModal(r) {
   const fmt = d => d ? new Date(d).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '—';
-  const kNgn = k => k > 0 ? '₦'+Number(k/100).toLocaleString('en-NG') : '₦0';
+  const usdMinorAmount = amount => amount >= 100000 ? Math.round(amount / 1000) : amount;
+  const kUsd = k => k > 0 ? '$'+Number(usdMinorAmount(k)/100).toLocaleString('en-US') : '$0';
   const URGENCY_COLORS = {urgent:'#EF4444',high:'#F59E0B',medium:'#3B82F6',low:'#6B7280'};
 
   document.getElementById('edit-subtitle').textContent = '#' + r.id + ' · ' + esc(r.domain_name);
@@ -871,8 +873,8 @@ function openEditModal(r) {
   document.getElementById('em-status').value   = r.status;
   document.getElementById('em-assigned').value = r.assigned_to || '';
 
-  document.getElementById('em-agreed').value      = r.agreed_price_kobo > 0 ? Math.round(r.agreed_price_kobo/100) : '';
-  document.getElementById('em-fee').value         = r.broker_fee_kobo   > 0 ? Math.round(r.broker_fee_kobo/100)   : '';
+  document.getElementById('em-agreed').value      = r.agreed_price_kobo > 0 ? (usdMinorAmount(r.agreed_price_kobo)/100) : '';
+  document.getElementById('em-fee').value         = r.broker_fee_kobo   > 0 ? (usdMinorAmount(r.broker_fee_kobo)/100)   : '';
   document.getElementById('em-commission').value  = r.commission_pct    || '';
 
   document.getElementById('em-latest-update').value = r.latest_update  || '';
@@ -881,7 +883,7 @@ function openEditModal(r) {
   // Summary display
   document.getElementById('em-user').textContent    = r.full_name || '—';
   document.getElementById('em-email').textContent   = r.email;
-  document.getElementById('em-budget').textContent  = kNgn(r.budget_kobo||0) + (r.budget_flexible ? ' (flexible)' : '');
+  document.getElementById('em-budget').textContent  = kUsd(r.budget_kobo||0) + (r.budget_flexible ? ' (flexible)' : '');
   document.getElementById('em-purpose').textContent = r.purpose ? ucfirst(r.purpose) : '';
   document.getElementById('em-created').textContent = fmt(r.created_at);
 

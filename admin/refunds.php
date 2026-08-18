@@ -14,7 +14,7 @@ $conn->query("
         user_id             INT  NOT NULL,
 
         amount_kobo         INT UNSIGNED     NOT NULL,
-        currency            CHAR(3)          NOT NULL DEFAULT 'NGN',
+        currency            CHAR(3)          NOT NULL DEFAULT 'USD',
         reason              ENUM('duplicate','fraudulent','customer_request','other')
                             NOT NULL DEFAULT 'customer_request',
         notes               VARCHAR(255)     NULL,
@@ -45,7 +45,8 @@ $conn->query("
 ");
 
 // ── Helpers ─────────────────────────────────────────────────
-$kobo = fn(int $k): string => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo = fn(int $k): string => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 
 // ── POST actions ─────────────────────────────────────────────
 $flash = null;
@@ -78,7 +79,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $payload = json_encode([
                 'transaction'   => (int)$ref['paystack_transaction_id'],
                 'amount'        => $ref['amount_kobo'],
-                'currency'      => $ref['pay_currency'] ?? 'NGN',
+                'currency'      => $ref['pay_currency'] ?? 'USD',
                 'customer_note' => $ref['notes'] ?: 'Admin refund retry',
                 'merchant_note' => "Retry by: {$adminUser['username']}",
             ]);
@@ -238,7 +239,7 @@ if (isset($_GET['export'])) {
     header('Content-Type: text/csv');
     header('Content-Disposition: attachment; filename="refunds_'.date('Y-m-d').'.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['ID','Payment ID','User ID','Email','Amount (₦)','Currency','Reason','Notes','Status','Paystack Refund ID','Credits Reversed','Processed By','Created','Updated']);
+    fputcsv($out, ['ID','Payment ID','User ID','Email','Amount ($)','Currency','Reason','Notes','Status','Paystack Refund ID','Credits Reversed','Processed By','Created','Updated']);
     $rs = $conn->query("
         SELECT r.id, r.payment_id, r.user_id, u.email,
                r.amount_kobo/100, r.currency, r.reason, r.notes,
@@ -873,9 +874,9 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
           <input class="inp" type="number" name="payment_id" min="1" placeholder="e.g. 42" required>
         </div>
         <div>
-          <label class="text-xs text-gray-400 mb-1 block">Refund amount (₦) <span class="text-red-400">*</span></label>
-          <input class="inp" type="number" name="amount_ngn" min="0.01" step="0.01" placeholder="e.g. 9000" required>
-          <p class="text-xs text-gray-500 mt-0.5">Enter in Naira, not kobo.</p>
+          <label class="text-xs text-gray-400 mb-1 block">Refund amount ($) <span class="text-red-400">*</span></label>
+          <input class="inp" type="number" name="amount_ngn" min="0.01" step="0.01" placeholder="e.g. 9" required>
+          <p class="text-xs text-gray-500 mt-0.5">Enter in dollars, stored as cents.</p>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
@@ -934,14 +935,15 @@ document.querySelectorAll('.modal-backdrop').forEach(m => {
 // ── Detail modal ──────────────────────────────────────────
 function openDetailModal(r) {
   const fmt  = d => d ? new Date(d).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
-  const kNgn = k => '₦' + Number(k/100).toLocaleString('en-NG',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const usdMinorAmount = amount => amount >= 100000 ? Math.round(amount / 1000) : amount;
+  const kUsd = k => '$' + Number(usdMinorAmount(k)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
   const fields = [
     {l:'Refund ID',          v:'#'+r.id},
     {l:'Payment ID',         v:'#'+r.payment_id},
     {l:'User',               v:'#'+r.user_id + ' · ' + esc(r.email)},
-    {l:'Amount',             v:kNgn(r.amount_kobo||0)},
-    {l:'Currency',           v:esc(r.currency||'NGN')},
+    {l:'Amount',             v:kUsd(r.amount_kobo||0)},
+    {l:'Currency',           v:esc(r.currency||'USD')},
     {l:'Reason',             v:esc((r.reason||'').replace(/_/g,' '))},
     {l:'Status',             v:esc(r.status)},
     {l:'Credits reversed',   v:r.credits_reversed||'0'},
@@ -968,7 +970,7 @@ function openRetryModal(id, email, amtKobo) {
   document.getElementById('retry-rid').value       = id;
   document.getElementById('retry-id').textContent  = '#' + id;
   document.getElementById('retry-email').textContent = email;
-  document.getElementById('retry-amount').textContent = '₦' + (amtKobo/100).toLocaleString('en-NG');
+  document.getElementById('retry-amount').textContent = '$' + (amtKobo/100).toLocaleString('en-NG');
   openModal('retryModal');
 }
 

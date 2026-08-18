@@ -595,7 +595,7 @@ body::before{content:'';position:fixed;inset:0;
         Upgrade to Pro to place backorders on expiring domains. We monitor the drop window and attempt to capture the domain the instant it's released — before anyone else.
       </div>
       <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
+        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — $9/mo
       </a>
     </div>
     <?php endif; ?>

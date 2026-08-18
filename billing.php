@@ -40,6 +40,11 @@ $stmt->close();
 
 if (!$user) { header('Location: logout.php'); exit(); }
 
+$currencySettings = getBillingCurrencySettings($conn);
+$billingCurrencyMode = $currencySettings['mode'];
+$usdNgnRate = $currencySettings['usd_ngn_rate'];
+$defaultCurrency = ($billingCurrencyMode === 'naira' || shouldDefaultToNaira()) ? 'NGN' : 'USD';
+
 // ── Fetch plans from DB (fallback to hardcoded if table not yet created) ──
 $plans = [];
 $planStmt = $conn->prepare("SELECT * FROM plans WHERE is_active = 1 ORDER BY sort_order ASC");
@@ -50,11 +55,11 @@ if ($planStmt) {
     $planStmt->close();
 }
 if (empty($plans)) {
-    // Fallback hardcoded plans (kobo amounts)
+    // Fallback hardcoded plans (USD cents)
     $plans = [
         ['slug'=>'free',  'name'=>'Free',  'price_monthly_kobo'=>0,       'price_yearly_kobo'=>0,        'credits_monthly'=>10,  'feature_whois'=>0,'feature_backorder'=>0,'feature_alerts'=>0,'feature_dead_sites'=>0,'feature_broker'=>0,'feature_bulk_lookup'=>0,'watchlist_limit'=>5],
-        ['slug'=>'pro',   'name'=>'Pro',   'price_monthly_kobo'=>900000,  'price_yearly_kobo'=>8900000,  'credits_monthly'=>100, 'feature_whois'=>1,'feature_backorder'=>1,'feature_alerts'=>1,'feature_dead_sites'=>1,'feature_broker'=>0,'feature_bulk_lookup'=>0,'watchlist_limit'=>0],
-        ['slug'=>'elite', 'name'=>'Elite', 'price_monthly_kobo'=>2900000, 'price_yearly_kobo'=>27900000, 'credits_monthly'=>500, 'feature_whois'=>1,'feature_backorder'=>1,'feature_alerts'=>1,'feature_dead_sites'=>1,'feature_broker'=>1,'feature_bulk_lookup'=>1,'watchlist_limit'=>0],
+        ['slug'=>'pro',   'name'=>'Pro',   'price_monthly_kobo'=>900,     'price_yearly_kobo'=>8900,     'credits_monthly'=>100, 'feature_whois'=>1,'feature_backorder'=>1,'feature_alerts'=>1,'feature_dead_sites'=>1,'feature_broker'=>0,'feature_bulk_lookup'=>0,'watchlist_limit'=>0],
+        ['slug'=>'elite', 'name'=>'Elite', 'price_monthly_kobo'=>2900,    'price_yearly_kobo'=>27900,    'credits_monthly'=>500, 'feature_whois'=>1,'feature_backorder'=>1,'feature_alerts'=>1,'feature_dead_sites'=>1,'feature_broker'=>1,'feature_bulk_lookup'=>1,'watchlist_limit'=>0],
     ];
 }
 
@@ -69,12 +74,23 @@ if ($pkgStmt) {
 }
 if (empty($packages)) {
     $packages = [
-        ['id'=>1,'name'=>'Starter', 'credits'=>25,  'price_kobo'=>250000,  'bonus_credits'=>0,  'is_popular'=>0],
-        ['id'=>2,'name'=>'Standard','credits'=>60,  'price_kobo'=>500000,  'bonus_credits'=>5,  'is_popular'=>1],
-        ['id'=>3,'name'=>'Power',   'credits'=>150, 'price_kobo'=>1000000, 'bonus_credits'=>20, 'is_popular'=>0],
-        ['id'=>4,'name'=>'Bulk',    'credits'=>400, 'price_kobo'=>2500000, 'bonus_credits'=>75, 'is_popular'=>0],
+        ['id'=>1,'name'=>'Starter', 'credits'=>25,  'price_kobo'=>250,     'bonus_credits'=>0,  'is_popular'=>0],
+        ['id'=>2,'name'=>'Standard','credits'=>60,  'price_kobo'=>500,     'bonus_credits'=>5,  'is_popular'=>1],
+        ['id'=>3,'name'=>'Power',   'credits'=>150, 'price_kobo'=>1000,    'bonus_credits'=>20, 'is_popular'=>0],
+        ['id'=>4,'name'=>'Bulk',    'credits'=>400, 'price_kobo'=>2500,    'bonus_credits'=>75, 'is_popular'=>0],
     ];
 }
+
+foreach ($plans as &$plan) {
+    $plan['price_monthly_kobo'] = usdMinorAmount((int)$plan['price_monthly_kobo']);
+    $plan['price_yearly_kobo']  = usdMinorAmount((int)$plan['price_yearly_kobo']);
+}
+unset($plan);
+
+foreach ($packages as &$pkg) {
+    $pkg['price_kobo'] = usdMinorAmount((int)$pkg['price_kobo']);
+}
+unset($pkg);
 
 // ── Fetch payment history ──────────────────────────────────
 $payments = [];
@@ -132,7 +148,8 @@ $showCancel  = isset($_GET['cancel']);
 $activePage  = 'billing';
 
 // Helpers
-$koboToNaira = fn($k) => '₦' . number_format($k / 100, 0, '.', ',');
+$formatMoney = fn($amount, $currency = 'USD') => formatCurrencyMinor((int)$amount, $currency);
+$formatUsdBase = fn($usdCents) => $formatMoney(usdCentsToCurrencyMinor((int)$usdCents, $defaultCurrency, $usdNgnRate), $defaultCurrency);
 $planColors  = ['free'=>'--text3','pro'=>'--green2','elite'=>'--purple'];
 $planIcons   = ['free'=>'fa-user','pro'=>'fa-bolt','elite'=>'fa-crown'];
 ?>
@@ -476,11 +493,21 @@ body::before{content:'';position:fixed;inset:0;
           <div class="section-title">Subscription plans</div>
           <div class="section-sub">All plans include domain availability checks. Credits reset each billing cycle.</div>
         </div>
-        <div class="billing-toggle" id="billingToggle">
-          <button class="btog-btn active" id="btnMonthly" onclick="setBilling('monthly')">Monthly</button>
-          <button class="btog-btn" id="btnYearly" onclick="setBilling('yearly')">
-            Yearly <span class="save-badge">Save ~18%</span>
-          </button>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+          <?php if ($billingCurrencyMode === 'auto'): ?>
+          <div class="billing-toggle" id="currencyToggle">
+            <button class="btog-btn <?= $defaultCurrency === 'USD' ? 'active' : '' ?>" id="btnCurrencyUSD" onclick="setCurrency('USD')">USD</button>
+            <button class="btog-btn <?= $defaultCurrency === 'NGN' ? 'active' : '' ?>" id="btnCurrencyNGN" onclick="setCurrency('NGN')">NGN</button>
+          </div>
+          <?php else: ?>
+          <div class="billing-toggle"><button class="btog-btn active" type="button">NGN only</button></div>
+          <?php endif; ?>
+          <div class="billing-toggle" id="billingToggle">
+            <button class="btog-btn active" id="btnMonthly" onclick="setBilling('monthly')">Monthly</button>
+            <button class="btog-btn" id="btnYearly" onclick="setBilling('yearly')">
+              Yearly <span class="save-badge">Save ~18%</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -489,9 +516,9 @@ body::before{content:'';position:fixed;inset:0;
           $slug       = $plan['slug'];
           $isCurrent  = ($slug === $userPlan);
           $isPopular  = ($slug === 'pro');
-          $monthlyNGN = $plan['price_monthly_kobo'] / 100;
-          $yearlyNGN  = $plan['price_yearly_kobo']  / 100;
-          $monthlyEquiv = $plan['price_yearly_kobo'] > 0 ? round($plan['price_yearly_kobo'] / 12 / 100) : 0;
+          $monthlyMinor = usdCentsToCurrencyMinor((int)$plan['price_monthly_kobo'], $defaultCurrency, $usdNgnRate);
+          $yearlyMinor  = usdCentsToCurrencyMinor((int)$plan['price_yearly_kobo'],  $defaultCurrency, $usdNgnRate);
+          $monthlyEquiv = $plan['price_yearly_kobo'] > 0 ? (int)round($yearlyMinor / 12) : 0;
 
           $features = [
             [$plan['credits_monthly'] . ' credits / month',   true,  'credits'],
@@ -516,15 +543,15 @@ body::before{content:'';position:fixed;inset:0;
 
           <div class="plan-price-wrap">
             <?php if ($slug === 'free'): ?>
-            <div class="plan-price"><sup>₦</sup>0</div>
+            <div class="plan-price"><sup><?= $defaultCurrency === 'NGN' ? '₦' : '$' ?></sup>0</div>
             <div class="plan-price-period">Free forever</div>
             <?php else: ?>
             <div class="plan-price" id="price-<?= $slug ?>">
-              <sup>₦</sup><?= number_format($monthlyNGN, 0, '.', ',') ?>
+              <sup><?= $defaultCurrency === 'NGN' ? '₦' : '$' ?></sup><?= number_format($monthlyMinor / 100, 0, '.', ',') ?>
             </div>
             <div class="plan-price-period" id="period-<?= $slug ?>">/month</div>
             <div class="plan-price-yearly" id="yearly-note-<?= $slug ?>" style="display:none;">
-              ₦<?= number_format($yearlyNGN, 0, '.', ',') ?> billed annually
+              <?= $formatMoney($yearlyMinor, $defaultCurrency) ?> billed annually
             </div>
             <?php endif; ?>
           </div>
@@ -631,7 +658,7 @@ body::before{content:'';position:fixed;inset:0;
             <div class="pkg-bonus">+ <?= $pkg['bonus_credits'] ?> bonus = <?= $total ?> total</div>
             <?php endif; ?>
           </div>
-          <div class="pkg-price"><?= $koboToNaira($pkg['price_kobo']) ?></div>
+          <div class="pkg-price" data-usd-cents="<?= (int)$pkg['price_kobo'] ?>"><?= $formatUsdBase($pkg['price_kobo']) ?></div>
           <button class="pkg-cta">Buy now</button>
         </div>
         <?php endforeach; ?>
@@ -688,7 +715,7 @@ body::before{content:'';position:fixed;inset:0;
           </div>
           <div class="ht-ref"><?= htmlspecialchars($pay['paystack_reference'] ?? '—') ?></div>
           <div class="ht-date"><?= date('M j, Y', strtotime($pay['created_at'])) ?></div>
-          <div class="ht-amount"><?= $koboToNaira($pay['amount_charged_kobo']) ?></div>
+          <div class="ht-amount"><?= $formatMoney($pay['amount_charged_kobo'], $pay['currency'] ?? 'USD') ?></div>
           <div style="text-align:right;"><span class="pay-status <?= $statusClass ?>"><?= ucfirst($pay['status']) ?></span></div>
         </div>
         <?php endforeach; ?>
@@ -740,13 +767,41 @@ const USER_NAME        = <?= json_encode($userName) ?>;
 const PAYSTACK_PK      = <?= json_encode($paystackPublicKey) ?>;
 const CURRENT_PLAN     = <?= json_encode($userPlan) ?>;
 const API_BILLING      = `${APP_BASE}/api/billing.php`;
+const CURRENCY_MODE    = <?= json_encode($billingCurrencyMode) ?>;
+const USD_NGN_RATE     = <?= json_encode($usdNgnRate) ?>;
 
-// Plan prices in kobo
+// Plan prices in USD cents
 const PLAN_PRICES = <?= json_encode(array_column($plans, null, 'slug')) ?>;
 let   billingCycle   = 'monthly';
+let   selectedCurrency = <?= json_encode($defaultCurrency) ?>;
 let   selectedPkgId  = null;
 let   selectedPkgAmt = 0;
 let   appliedPromo   = null;
+
+const currencySymbol = currency => currency === 'NGN' ? '₦' : '$';
+const currencyLocale = currency => currency === 'NGN' ? 'en-NG' : 'en-US';
+const convertUsdCents = (usdCents, currency = selectedCurrency) => {
+  const cents = parseInt(usdCents || 0, 10);
+  return currency === 'NGN' ? Math.round((cents / 100) * USD_NGN_RATE * 100) : cents;
+};
+const formatMinor = (amountMinor, currency = selectedCurrency) =>
+  currencySymbol(currency) + Number((amountMinor || 0) / 100).toLocaleString(currencyLocale(currency), { maximumFractionDigits: 0 });
+
+function setCurrency(currency) {
+  if (CURRENCY_MODE !== 'auto') currency = 'NGN';
+  selectedCurrency = currency === 'NGN' ? 'NGN' : 'USD';
+  document.getElementById('btnCurrencyUSD')?.classList.toggle('active', selectedCurrency === 'USD');
+  document.getElementById('btnCurrencyNGN')?.classList.toggle('active', selectedCurrency === 'NGN');
+  updateCurrencyPrices();
+}
+
+function updateCurrencyPrices() {
+  setBilling(billingCycle);
+  document.querySelectorAll('.plan-price sup').forEach(el => { el.textContent = currencySymbol(selectedCurrency); });
+  document.querySelectorAll('.pkg-price[data-usd-cents]').forEach(el => {
+    el.textContent = formatMinor(convertUsdCents(el.dataset.usdCents));
+  });
+}
 
 // ── Billing cycle toggle ──────────────────────────────────
 function setBilling(cycle) {
@@ -757,19 +812,20 @@ function setBilling(cycle) {
   <?php foreach ($plans as $plan): if ($plan['slug'] === 'free') continue; ?>
   (function() {
     const slug        = <?= json_encode($plan['slug']) ?>;
-    const monthlyKobo = <?= (int)$plan['price_monthly_kobo'] ?>;
-    const yearlyKobo  = <?= (int)$plan['price_yearly_kobo'] ?>;
+    const monthlyKobo = convertUsdCents(<?= (int)$plan['price_monthly_kobo'] ?>);
+    const yearlyKobo  = convertUsdCents(<?= (int)$plan['price_yearly_kobo'] ?>);
     const monthlyEq   = Math.round(yearlyKobo / 12 / 100);
     const priceEl     = document.getElementById('price-' + slug);
     const periodEl    = document.getElementById('period-' + slug);
     const yearlyNote  = document.getElementById('yearly-note-' + slug);
     if (!priceEl) return;
     if (cycle === 'yearly') {
-      priceEl.innerHTML   = `<sup>₦</sup>${monthlyEq.toLocaleString()}`;
+      priceEl.innerHTML   = `<sup>${currencySymbol(selectedCurrency)}</sup>${monthlyEq.toLocaleString(currencyLocale(selectedCurrency))}`;
       periodEl.textContent = '/month, billed yearly';
       if (yearlyNote) yearlyNote.style.display = 'block';
+      if (yearlyNote) yearlyNote.textContent = `${formatMinor(yearlyKobo)} billed annually`;
     } else {
-      priceEl.innerHTML   = `<sup>₦</sup>${(monthlyKobo/100).toLocaleString()}`;
+      priceEl.innerHTML   = `<sup>${currencySymbol(selectedCurrency)}</sup>${(monthlyKobo/100).toLocaleString(currencyLocale(selectedCurrency), { maximumFractionDigits: 0 })}`;
       periodEl.textContent = '/month';
       if (yearlyNote) yearlyNote.style.display = 'none';
     }
@@ -781,9 +837,10 @@ function setBilling(cycle) {
 function initSubscription(planSlug) {
   const planData  = PLAN_PRICES[planSlug];
   if (!planData) return;
-  const amountKobo = billingCycle === 'yearly'
+  const amountUsdCents = billingCycle === 'yearly'
     ? parseInt(planData.price_yearly_kobo)
     : parseInt(planData.price_monthly_kobo);
+  const amountKobo = convertUsdCents(amountUsdCents);
   if (amountKobo === 0) return;
 
   const ref = 'SUB_' + Date.now() + '_' + Math.random().toString(36).substr(2,6).toUpperCase();
@@ -792,12 +849,13 @@ function initSubscription(planSlug) {
     key:       PAYSTACK_PK,
     email:     USER_EMAIL,
     amount:    amountKobo,
-    currency:  'NGN',
+    currency:  selectedCurrency,
     ref:       ref,
     metadata: {
       custom_fields: [
         { display_name: 'Plan',          variable_name: 'plan',           value: planSlug },
         { display_name: 'Billing cycle', variable_name: 'billing_cycle',  value: billingCycle },
+        { display_name: 'Currency',      variable_name: 'currency',       value: selectedCurrency },
         { display_name: 'User name',     variable_name: 'user_name',      value: USER_NAME },
         { display_name: 'Promo code',    variable_name: 'promo_code',     value: appliedPromo || '' },
       ]
@@ -818,25 +876,27 @@ function selectPackage(pkgId, priceKobo) {
   document.querySelectorAll('.pkg-card').forEach(c => c.classList.remove('selected'));
   document.getElementById('pkg-' + pkgId).classList.add('selected');
   selectedPkgId  = pkgId;
-  selectedPkgAmt = priceKobo;
+  selectedPkgAmt = convertUsdCents(priceKobo);
 
   // Short delay then launch Paystack
   setTimeout(() => initTopup(pkgId, priceKobo), 200);
 }
 
 function initTopup(pkgId, amountKobo) {
+  amountKobo = convertUsdCents(amountKobo);
   const ref = 'TOP_' + Date.now() + '_' + Math.random().toString(36).substr(2,6).toUpperCase();
 
   const handler = PaystackPop.setup({
     key:      PAYSTACK_PK,
     email:    USER_EMAIL,
     amount:   amountKobo,
-    currency: 'NGN',
+    currency: selectedCurrency,
     ref:      ref,
     metadata: {
       custom_fields: [
         { display_name: 'Package ID',  variable_name: 'package_id',  value: pkgId },
         { display_name: 'User name',   variable_name: 'user_name',   value: USER_NAME },
+        { display_name: 'Currency',    variable_name: 'currency',    value: selectedCurrency },
         { display_name: 'Promo code',  variable_name: 'promo_code',  value: appliedPromo || '' },
       ]
     },
@@ -859,7 +919,7 @@ async function verifyPayment(reference, type, meta) {
     const res  = await fetch(API_BILLING, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ action: 'verify', reference, type, meta, promo: appliedPromo })
+      body:    JSON.stringify({ action: 'verify', reference, type, meta, meta2: billingCycle, currency: selectedCurrency, promo: appliedPromo })
     });
     const data = await res.json();
 
@@ -888,7 +948,7 @@ async function applyPromo() {
     const res  = await fetch(API_BILLING, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ action: 'validate_promo', code })
+      body:    JSON.stringify({ action: 'validate_promo', code, currency: selectedCurrency })
     });
     const data = await res.json();
 

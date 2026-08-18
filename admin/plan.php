@@ -15,7 +15,7 @@ $conn->query("
         description                 TEXT             NULL,
         price_monthly_kobo          INT UNSIGNED     NOT NULL DEFAULT 0,
         price_yearly_kobo           INT UNSIGNED     NOT NULL DEFAULT 0,
-        currency                    CHAR(3)          NOT NULL DEFAULT 'NGN',
+        currency                    CHAR(3)          NOT NULL DEFAULT 'USD',
         paystack_plan_code_monthly  VARCHAR(64)      NULL DEFAULT NULL,
         paystack_plan_code_yearly   VARCHAR(64)      NULL DEFAULT NULL,
         credits_monthly             SMALLINT UNSIGNED NOT NULL DEFAULT 0,
@@ -45,13 +45,14 @@ if ((int)($conn->query("SELECT COUNT(*) as c FROM plans")?->fetch_assoc()['c'] ?
             feature_broker,feature_bulk_lookup,watchlist_limit,search_history_days,sort_order)
         VALUES
           ('free', 'Free',  0,       0,        10,  0,  0,0,0,0,0,0, 5,  7, 1),
-          ('pro',  'Pro',   900000,  8900000,  100, 20, 1,1,1,1,0,0, 0, 90, 2),
-          ('elite','Elite', 2900000, 27900000, 500, 50, 1,1,1,1,1,1, 0,365, 3)
+          ('pro',  'Pro',   900,     8900,     100, 20, 1,1,1,1,0,0, 0, 90, 2),
+          ('elite','Elite', 2900,    27900,    500, 50, 1,1,1,1,1,1, 0,365, 3)
     ");
 }
 
 // ── Helpers ──────────────────────────────────────────────────
-$kobo  = fn(int $k): string => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo  = fn(int $k): string => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 $flash = null;
 
 // ── POST: Plan CRUD ───────────────────────────────────────────
@@ -145,7 +146,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                    watchlist_limit,search_history_days,sort_order,is_active)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ");
-            $ins->bind_param("sssiissiiiiiiiiiiiii",
+            $ins->bind_param("sssiissiiiiiiiiiiii",
                 $slug,$name,$desc,$priceMonthly,$priceYearly,
                 $psMonthly,$psYearly,$credMonthly,$credSignup,
                 $fWhois,$fBackorder,$fAlerts,$fDead,$fBroker,$fBulk,
@@ -237,7 +238,11 @@ $planRows = $conn->query("
     FROM plans p
     ORDER BY p.sort_order ASC, p.id ASC
 ");
-while ($r = $planRows->fetch_assoc()) $plans[] = $r;
+while ($r = $planRows->fetch_assoc()) {
+    $r['price_monthly_kobo'] = $usdMinorAmount((int)$r['price_monthly_kobo']);
+    $r['price_yearly_kobo']  = $usdMinorAmount((int)$r['price_yearly_kobo']);
+    $plans[] = $r;
+}
 
 // ── Active subscriptions with user info ───────────────────────
 $subSearch  = trim($_GET['search'] ?? '');
@@ -289,7 +294,11 @@ $dStmt->bind_param($allTypes, ...$allBinds);
 $dStmt->execute();
 $subs = [];
 $results = $dStmt->get_result();
-while ($r = $results->fetch_assoc()) $subs[] = $r;
+while ($r = $results->fetch_assoc()) {
+    $r['price_monthly_kobo'] = $usdMinorAmount((int)$r['price_monthly_kobo']);
+    $r['price_yearly_kobo']  = $usdMinorAmount((int)$r['price_yearly_kobo']);
+    $subs[] = $r;
+}
 $dStmt->close();
 
 // ── Summary stats ─────────────────────────────────────────────
@@ -506,7 +515,7 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
               <?php endif; ?>
             </div>
             <div class="font-mono text-2xl font-black text-white">
-              <?= $plan['price_monthly_kobo'] > 0 ? $kobo((int)$plan['price_monthly_kobo']) : '₦0' ?>
+              <?= $plan['price_monthly_kobo'] > 0 ? $kobo((int)$plan['price_monthly_kobo']) : '$0' ?>
               <span class="text-gray-500 text-sm font-normal">/mo</span>
             </div>
             <?php if ($plan['price_yearly_kobo'] > 0): ?>
@@ -850,13 +859,13 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       <!-- Pricing -->
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="form-label">Monthly price (₦)</label>
-          <input class="inp" type="number" name="price_monthly_ngn" id="pm-monthly" min="0" step="1" placeholder="9000">
-          <p class="form-hint">Enter in Naira. Stored as kobo internally.</p>
+          <label class="form-label">Monthly price ($)</label>
+          <input class="inp" type="number" name="price_monthly_ngn" id="pm-monthly" min="0" step="0.01" placeholder="9">
+          <p class="form-hint">Enter in dollars. Stored as cents internally.</p>
         </div>
         <div>
-          <label class="form-label">Yearly price (₦)</label>
-          <input class="inp" type="number" name="price_yearly_ngn" id="pm-yearly" min="0" step="1" placeholder="89000">
+          <label class="form-label">Yearly price ($)</label>
+          <input class="inp" type="number" name="price_yearly_ngn" id="pm-yearly" min="0" step="0.01" placeholder="89">
         </div>
       </div>
 

@@ -67,7 +67,7 @@ try {
             echo json_encode(['success' => false, 'message' => 'Unknown action.']);
     }
     $conn->close();
-} catch (Exception $e) {
+} catch (Throwable $e) {
     ob_end_clean();
     http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'Server error: ' . $e->getMessage()]);
@@ -78,7 +78,7 @@ try {
 // ═════════════════════════════════════════════════════════════
 function handleVerify($conn, $userId, $input, $secret) {
     $reference = trim($input['reference'] ?? '');
-    $type      = $input['type'] ?? 'subscription'; // subscription | credit_topup
+    $type      = in_array($input['type'] ?? '', ['subscription', 'credit_topup'], true) ? $input['type'] : ''; // subscription | credit_topup
     $meta      = $input['meta'] ?? null;           // planSlug or packageId
     $promoCode = trim($input['promo'] ?? '');
 
@@ -108,8 +108,31 @@ function handleVerify($conn, $userId, $input, $secret) {
     }
 
     $txn       = $ps['data'];
+    $metaValues = paystackMetadataValues($txn);
+    if (!$meta) {
+        $meta = $metaValues['plan'] ?? $metaValues['package_id'] ?? null;
+    }
+    if (empty($input['meta2']) && !empty($metaValues['billing_cycle'])) {
+        $input['meta2'] = $metaValues['billing_cycle'];
+    }
+    if (!$type) {
+        $type = !empty($metaValues['package_id']) ? 'credit_topup' : 'subscription';
+    }
     $amtKobo   = (int)$txn['amount'];
-    $currency  = $txn['currency'] ?? 'NGN';
+    $currency  = $txn['currency'] ?? 'USD';
+    $currencySettings = getBillingCurrencySettings($conn);
+    $allowedCurrencies = $currencySettings['mode'] === 'naira' ? ['NGN'] : ['USD', 'NGN'];
+    if (!in_array($currency, $allowedCurrencies, true)) {
+        ob_end_clean();
+        echo json_encode(['success'=>false,'message'=>'This currency is not currently allowed.']);
+        return;
+    }
+    $expectedAmount = expectedPaymentAmount($conn, $type, $meta, $input['meta2'] ?? 'monthly', $currency, $currencySettings);
+    if ($expectedAmount <= 0 || $expectedAmount !== $amtKobo) {
+        ob_end_clean();
+        echo json_encode(['success'=>false,'message'=>'Payment amount does not match the selected item.']);
+        return;
+    }
     $channel   = $txn['channel'] ?? null;
     $fees      = (int)($txn['fees'] ?? 0);
     $gwResp    = $txn['gateway_response'] ?? null;
@@ -118,11 +141,14 @@ function handleVerify($conn, $userId, $input, $secret) {
     $txnId     = (int)$txn['id'];
 
     // ── 2. Idempotency — skip if already processed ────────────
-    $dup = $conn->prepare("SELECT id FROM payments WHERE paystack_reference = ? LIMIT 1");
+    $dup = $conn->prepare("SELECT id, type, amount_kobo, discount_kobo, currency, description FROM payments WHERE paystack_reference = ? LIMIT 1");
     $dup->bind_param("s", $reference);
     $dup->execute();
-    if ($dup->get_result()->num_rows > 0) {
+    $dupResult = $dup->get_result();
+    if ($dupResult->num_rows > 0) {
+        $existingPayment = $dupResult->fetch_assoc();
         $dup->close();
+        completeExistingPayment($conn, $userId, $existingPayment, $input, $txn);
         ob_end_clean();
         echo json_encode(['success'=>true,'message'=>'Payment already processed.']);
         return;
@@ -136,7 +162,7 @@ function handleVerify($conn, $userId, $input, $secret) {
         $promoRow = getActivePromo($conn, $promoCode, $userId);
         if ($promoRow) {
             $promoId      = $promoRow['id'];
-            $discountKobo = computeDiscount($promoRow, $amtKobo);
+            $discountKobo = computeDiscount($promoRow, $amtKobo, $currency, $currencySettings);
         }
     }
 
@@ -153,7 +179,7 @@ function handleVerify($conn, $userId, $input, $secret) {
     ");
     $ipAddr = getClientIP();
     $payStmt->bind_param(
-        "issiiisssssisss",
+        "isiiississisiss",
         $userId, $type, $amtKobo, $discountKobo, $charged, $currency,
         $reference, $txnId, $gwResp,
         $channel, $fees, $ipAddr, $promoId, $description, $paidAt
@@ -166,24 +192,33 @@ function handleVerify($conn, $userId, $input, $secret) {
     $authId = null;
     if (!empty($auth['authorization_code']) && ($auth['reusable'] ?? false)) {
         $sig = $auth['signature'] ?? $auth['authorization_code'];
+        $authorizationCode = $auth['authorization_code'];
+        $cardType = $auth['card_type'] ?? null;
+        $last4 = $auth['last4'] ?? null;
+        $expMonth = $auth['exp_month'] ?? null;
+        $expYear = $auth['exp_year'] ?? null;
+        $bin = $auth['bin'] ?? null;
+        $bank = $auth['bank'] ?? null;
+        $authChannel = $auth['channel'] ?? $channel;
+        $countryCode = $auth['country_code'] ?? null;
         $authStmt = $conn->prepare("
             INSERT INTO paystack_authorizations
               (user_id, authorization_code, card_type, last4, exp_month, exp_year, bin, bank, channel, signature, reusable, country_code, is_default)
             VALUES (?,?,?,?,?,?,?,?,?,?,1,?,1)
             ON DUPLICATE KEY UPDATE authorization_code=VALUES(authorization_code), is_active=1, updated_at=NOW()
         ");
-        $authStmt->bind_param("ssssssssss s",
+        $authStmt->bind_param("issssssssss",
             $userId,
-            $auth['authorization_code'],
-            $auth['card_type']    ?? null,
-            $auth['last4']        ?? null,
-            $auth['exp_month']    ?? null,
-            $auth['exp_year']     ?? null,
-            $auth['bin']          ?? null,
-            $auth['bank']         ?? null,
-            $auth['channel']      ?? $channel,
+            $authorizationCode,
+            $cardType,
+            $last4,
+            $expMonth,
+            $expYear,
+            $bin,
+            $bank,
+            $authChannel,
             $sig,
-            $auth['country_code'] ?? null
+            $countryCode
         );
         $authStmt->execute();
         $authId = $conn->insert_id ?: null;
@@ -225,8 +260,10 @@ function fulfillSubscription($conn, $userId, $paymentId, $authId, $planSlug, $bi
     if (!$plan) return;
 
     // Deactivate old subscriptions
-    $conn->prepare("UPDATE subscriptions SET status='canceled', canceled_at=NOW() WHERE user_id=? AND status NOT IN ('canceled')")
-         ->execute() && null;
+    $oldSubStmt = $conn->prepare("UPDATE subscriptions SET status='canceled', canceled_at=NOW() WHERE user_id=? AND status NOT IN ('canceled')");
+    $oldSubStmt->bind_param("i", $userId);
+    $oldSubStmt->execute();
+    $oldSubStmt->close();
 
     // Paystack subscription code from metadata (populated by webhook later; blank for now)
     $psCodes  = $txn['metadata']['custom_fields'] ?? [];
@@ -250,7 +287,7 @@ function fulfillSubscription($conn, $userId, $paymentId, $authId, $planSlug, $bi
           current_period_end=VALUES(current_period_end),
           next_billing_at=VALUES(next_billing_at), updated_at=NOW()
     ");
-    $subStmt->bind_param("iisssisss",
+    $subStmt->bind_param("iississsi",
         $userId, $plan['id'], $billingCycle, $subCode,
         $authId, $now, $end, $end, $promoId
     );
@@ -279,6 +316,58 @@ function fulfillSubscription($conn, $userId, $paymentId, $authId, $planSlug, $bi
     appendLedger($conn, $userId, $creditsToAdd, 'plan_renewal', $paymentId, null, "Plan: {$planSlug}");
 }
 
+function completeExistingPayment($conn, $userId, array $payment, array $input, array $txn): void {
+    $paymentId = (int)$payment['id'];
+    $type = $payment['type'] ?: ($input['type'] ?? '');
+    $meta = $input['meta'] ?? null;
+
+    if ($type === 'subscription' && $meta) {
+        $check = $conn->prepare("
+            SELECT s.id
+            FROM subscriptions s
+            JOIN plans p ON p.id = s.plan_id
+            WHERE s.user_id=?
+              AND p.slug=?
+              AND s.status IN ('active','trialing','past_due','non_renewing')
+              AND (s.current_period_end IS NULL OR s.current_period_end >= NOW())
+            LIMIT 1
+        ");
+        $check->bind_param("is", $userId, $meta);
+        $check->execute();
+        $hasSub = $check->get_result()->num_rows > 0;
+        $check->close();
+        if (!$hasSub) {
+            fulfillSubscription($conn, $userId, $paymentId, null, $meta, $input['meta2'] ?? 'monthly', null, $txn);
+        }
+    } elseif ($type === 'credit_topup' && $meta) {
+        $check = $conn->prepare("SELECT id FROM credit_ledger WHERE payment_id=? AND type='topup_purchase' LIMIT 1");
+        $check->bind_param("i", $paymentId);
+        $check->execute();
+        $hasLedger = $check->get_result()->num_rows > 0;
+        $check->close();
+        if (!$hasLedger) {
+            fulfillCreditTopup($conn, $userId, $paymentId, (int)$meta);
+        }
+    }
+
+    $inv = $conn->prepare("SELECT id FROM invoices WHERE payment_id=? LIMIT 1");
+    $inv->bind_param("i", $paymentId);
+    $inv->execute();
+    $hasInvoice = $inv->get_result()->num_rows > 0;
+    $inv->close();
+    if (!$hasInvoice) {
+        buildInvoice(
+            $conn,
+            $userId,
+            $paymentId,
+            (int)$payment['amount_kobo'],
+            (int)$payment['discount_kobo'],
+            $payment['currency'] ?: 'USD',
+            $payment['description'] ?: ucfirst($type)
+        );
+    }
+}
+
 function fulfillCreditTopup($conn, $userId, $paymentId, $packageId) {
     $pkgStmt = $conn->prepare("SELECT credits, bonus_credits FROM credit_packages WHERE id=? AND is_active=1");
     $pkgStmt->bind_param("i", $packageId);
@@ -289,7 +378,6 @@ function fulfillCreditTopup($conn, $userId, $paymentId, $packageId) {
 
     $total = $pkg['credits'] + ($pkg['bonus_credits'] ?? 0);
 
-    $conn->prepare("UPDATE users SET credits=credits+? WHERE id=?")->bind_param("ii", $total, $userId) && null;
     $updStmt = $conn->prepare("UPDATE users SET credits=credits+? WHERE id=?");
     $updStmt->bind_param("ii", $total, $userId);
     $updStmt->execute();
@@ -316,6 +404,8 @@ function appendLedger($conn, $userId, $delta, $type, $paymentId, $domain, $note)
 }
 
 function buildInvoice($conn, $userId, $paymentId, $amtKobo, $discountKobo, $currency, $description) {
+    ensureInvoiceTables($conn);
+
     // Fetch billing info
     $uStmt = $conn->prepare("SELECT email, full_name, billing_email, billing_name, billing_phone FROM users WHERE id=?");
     $uStmt->bind_param("i", $userId);
@@ -336,7 +426,7 @@ function buildInvoice($conn, $userId, $paymentId, $amtKobo, $discountKobo, $curr
     $bName  = $u['billing_name']  ?: $u['full_name'];
     $bEmail = $u['billing_email'] ?: $u['email'];
     $bPhone = $u['billing_phone'] ?? null;
-    $invStmt->bind_param("iisiiiiissss",
+    $invStmt->bind_param("iisiiiissss",
         $userId, $paymentId, $invNum,
         $amtKobo, $discountKobo, $total, $total, $currency,
         $bName, $bEmail, $bPhone
@@ -352,11 +442,53 @@ function buildInvoice($conn, $userId, $paymentId, $amtKobo, $discountKobo, $curr
     $lineStmt->close();
 }
 
+function ensureInvoiceTables($conn): void {
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS invoices (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            user_id INT NOT NULL,
+            payment_id INT UNSIGNED NOT NULL,
+            invoice_number VARCHAR(64) NOT NULL,
+            status ENUM('draft','paid','void','refunded') NOT NULL DEFAULT 'paid',
+            subtotal_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            discount_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            total_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            amount_paid_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            currency CHAR(3) NOT NULL DEFAULT 'USD',
+            billing_name VARCHAR(255) NULL,
+            billing_email VARCHAR(255) NULL,
+            billing_phone VARCHAR(64) NULL,
+            paid_at TIMESTAMP NULL DEFAULT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_invoices_payment (payment_id),
+            UNIQUE KEY uq_invoices_number (invoice_number)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS invoice_items (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            invoice_id INT UNSIGNED NOT NULL,
+            description VARCHAR(255) NOT NULL,
+            quantity INT UNSIGNED NOT NULL DEFAULT 1,
+            unit_price_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            amount_kobo INT UNSIGNED NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_invoice_items_invoice (invoice_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+}
+
 // ═════════════════════════════════════════════════════════════
 // ACTION: validate promo code
 // ═════════════════════════════════════════════════════════════
 function handleValidatePromo($conn, $userId, $input) {
     $code = strtoupper(trim($input['code'] ?? ''));
+    $currency = in_array($input['currency'] ?? 'USD', ['USD', 'NGN'], true) ? $input['currency'] : 'USD';
+    $currencySettings = getBillingCurrencySettings($conn);
     if (!$code) { ob_end_clean(); echo json_encode(['valid'=>false,'message'=>'No code provided.']); return; }
 
     $promo = getActivePromo($conn, $code, $userId);
@@ -367,9 +499,14 @@ function handleValidatePromo($conn, $userId, $input) {
         return;
     }
 
+    $promoValue = (int)$promo['value'];
+    if ($promo['type'] === 'amount_off') {
+        $promoValue = usdCentsToCurrencyMinor(usdMinorAmount($promoValue), $currency, $currencySettings['usd_ngn_rate']);
+    }
+
     $desc = match($promo['type']) {
         'percent_off'  => number_format($promo['value'], 0) . '% off your subscription',
-        'amount_off'   => '₦' . number_format($promo['value'] / 100, 0) . ' off',
+        'amount_off'   => formatCurrencyMinor($promoValue, $currency) . ' off',
         'free_credits' => (int)$promo['value'] . ' free credits added to your account',
         'free_trial'   => (int)$promo['value'] . ' extra days of free trial',
         default        => 'Discount applied',
@@ -476,8 +613,6 @@ function handleWebhook($secret) {
             case 'invoice.payment_failed':
                 $subCode = $data['subscription']['subscription_code'] ?? null;
                 if ($subCode) {
-                    $conn->prepare("UPDATE subscriptions SET status='past_due', retry_count=retry_count+1, last_retry_at=NOW() WHERE paystack_subscription_code=?")
-                         ->bind_param("s", $subCode) && null;
                     $upd = $conn->prepare("UPDATE subscriptions SET status='past_due', retry_count=retry_count+1, last_retry_at=NOW() WHERE paystack_subscription_code=?");
                     $upd->bind_param("s", $subCode);
                     $upd->execute();
@@ -514,8 +649,6 @@ function handleWebhook($secret) {
 
         // Update log status
         $statusStr = $processed ? 'processed' : 'ignored';
-        $conn->prepare("UPDATE webhooks_log SET status=?, processed_at=NOW() WHERE id=?")
-             ->bind_param("si", $statusStr, $whId) && null;
         $upd = $conn->prepare("UPDATE webhooks_log SET status=?, processed_at=NOW() WHERE id=?");
         $upd->bind_param("si", $statusStr, $whId);
         $upd->execute();
@@ -564,12 +697,56 @@ function getActivePromo($conn, $code, $userId) {
     return $promo;
 }
 
-function computeDiscount($promo, $amtKobo) {
+function computeDiscount($promo, $amtKobo, $currency = 'USD', ?array $currencySettings = null) {
+    $currencySettings = $currencySettings ?: ['usd_ngn_rate' => 1500];
     return match($promo['type']) {
         'percent_off' => (int)round($amtKobo * $promo['value'] / 100),
-        'amount_off'  => min((int)$promo['value'], $amtKobo),
+        'amount_off'  => min(usdCentsToCurrencyMinor(usdMinorAmount((int)$promo['value']), $currency, $currencySettings['usd_ngn_rate']), $amtKobo),
         default       => 0,
     };
+}
+
+function expectedPaymentAmount($conn, string $type, $meta, string $billingCycle, string $currency, array $currencySettings): int {
+    if ($type === 'subscription') {
+        $stmt = $conn->prepare("SELECT price_monthly_kobo, price_yearly_kobo FROM plans WHERE slug=? AND is_active=1 LIMIT 1");
+        $stmt->bind_param("s", $meta);
+        $stmt->execute();
+        $plan = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$plan) return 0;
+        $usdCents = $billingCycle === 'yearly'
+            ? usdMinorAmount((int)$plan['price_yearly_kobo'])
+            : usdMinorAmount((int)$plan['price_monthly_kobo']);
+        return usdCentsToCurrencyMinor($usdCents, $currency, $currencySettings['usd_ngn_rate']);
+    }
+
+    if ($type === 'credit_topup') {
+        $packageId = (int)$meta;
+        $stmt = $conn->prepare("SELECT price_kobo FROM credit_packages WHERE id=? AND is_active=1 LIMIT 1");
+        $stmt->bind_param("i", $packageId);
+        $stmt->execute();
+        $pkg = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$pkg) return 0;
+        return usdCentsToCurrencyMinor(usdMinorAmount((int)$pkg['price_kobo']), $currency, $currencySettings['usd_ngn_rate']);
+    }
+
+    return 0;
+}
+
+function paystackMetadataValues(array $txn): array {
+    $values = [];
+    $fields = $txn['metadata']['custom_fields'] ?? [];
+    if (is_array($fields)) {
+        foreach ($fields as $field) {
+            if (!is_array($field)) continue;
+            $key = $field['variable_name'] ?? null;
+            if ($key) {
+                $values[$key] = $field['value'] ?? null;
+            }
+        }
+    }
+    return $values;
 }
 
 function recordPromoUse($conn, $promoId, $userId, $paymentId, $discountKobo) {
@@ -577,8 +754,6 @@ function recordPromoUse($conn, $promoId, $userId, $paymentId, $discountKobo) {
     $ins->bind_param("iiii", $promoId, $userId, $paymentId, $discountKobo);
     $ins->execute();
     $ins->close();
-    $conn->prepare("UPDATE promo_codes SET uses_count=uses_count+1 WHERE id=?")
-         ->bind_param("i", $promoId) && null;
     $upd = $conn->prepare("UPDATE promo_codes SET uses_count=uses_count+1 WHERE id=?");
     $upd->bind_param("i", $promoId);
     $upd->execute();

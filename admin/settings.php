@@ -7,6 +7,8 @@ $conn = getDBConnection();
 $message = '';
 $messageType = '';
 
+ensureSiteSettingsTable($conn);
+
 // Handle password change
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
     $currentPassword = $_POST['current_password'];
@@ -81,14 +83,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings'])) {
     $contactEmail = $conn->real_escape_string($_POST['contact_email']);
     $maintenanceMode = isset($_POST['maintenance_mode']) ? 1 : 0;
     
-    // Create settings table if not exists
-    $conn->query("CREATE TABLE IF NOT EXISTS site_settings (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        setting_key VARCHAR(100) UNIQUE,
-        setting_value TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )");
-    
     // Save settings
     $settings = [
         'site_name' => $siteName,
@@ -109,12 +103,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings'])) {
     logAdminActivity($user['id'], 'UPDATE_SETTINGS', 'Updated site settings');
 }
 
-// Load current settings
-$settings = [];
-$result = $conn->query("SELECT setting_key, setting_value FROM site_settings");
-while ($row = $result->fetch_assoc()) {
-    $settings[$row['setting_key']] = $row['setting_value'];
+// Handle billing currency settings
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_currency_settings'])) {
+    $currencyMode = in_array($_POST['billing_currency_mode'] ?? '', ['auto', 'naira'], true)
+        ? $_POST['billing_currency_mode']
+        : 'auto';
+    $usdNgnRate = max(1, (float)($_POST['billing_usd_ngn_rate'] ?? 1500));
+
+    $stmt = $conn->prepare("
+        INSERT INTO site_settings (setting_key, setting_value)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+    ");
+    foreach ([
+        'billing_currency_mode' => $currencyMode,
+        'billing_usd_ngn_rate' => (string)$usdNgnRate,
+    ] as $key => $value) {
+        $stmt->bind_param("ss", $key, $value);
+        $stmt->execute();
+    }
+    $stmt->close();
+
+    $message = '<div class="bg-green-500/20 border border-green-500/50 rounded-lg p-3 mb-4">
+        <i class="fas fa-check-circle mr-2"></i> Billing currency settings saved successfully!
+    </div>';
+    $messageType = 'success';
+    logAdminActivity($user['id'], 'UPDATE_CURRENCY_SETTINGS', "Currency mode: {$currencyMode}; USD/NGN: {$usdNgnRate}");
 }
+
+// Load current settings
+$settings = getSiteSettings($conn);
 
 // Get admin info
 $adminStmt = $conn->prepare("SELECT username, email, created_at, last_login FROM admin_users WHERE id = ?");
@@ -407,6 +425,36 @@ $conn->close();
                             </div>
                             <button type="submit" name="save_settings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg transition w-full md:w-auto">
                                 <i class="fas fa-save mr-2"></i> Save Settings
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Billing Currency Card -->
+                    <div class="settings-card rounded-xl p-6">
+                        <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+                            <i class="fas fa-money-bill-wave text-emerald-400"></i>
+                            Billing Currency
+                        </h2>
+                        <form method="POST" class="space-y-4">
+                            <div>
+                                <label class="block text-gray-300 text-sm mb-2">Currency mode</label>
+                                <select name="billing_currency_mode"
+                                    class="input-field w-full bg-slate-700 border border-gray-600 rounded-lg py-2.5 px-3 text-white focus:outline-none focus:border-blue-500 transition">
+                                    <?php $currencyMode = $settings['billing_currency_mode'] ?? 'auto'; ?>
+                                    <option value="auto" <?php echo $currencyMode === 'auto' ? 'selected' : ''; ?>>Auto: allow Dollar and Naira</option>
+                                    <option value="naira" <?php echo $currencyMode === 'naira' ? 'selected' : ''; ?>>Naira only</option>
+                                </select>
+                                <p class="text-xs text-gray-500 mt-1">Auto defaults Nigerian visitors to naira, but still lets users choose USD.</p>
+                            </div>
+                            <div>
+                                <label class="block text-gray-300 text-sm mb-2">USD to NGN rate</label>
+                                <input type="number" name="billing_usd_ngn_rate" min="1" step="0.01"
+                                    value="<?php echo htmlspecialchars($settings['billing_usd_ngn_rate'] ?? '1500'); ?>"
+                                    class="input-field w-full bg-slate-700 border border-gray-600 rounded-lg py-2.5 px-3 text-white focus:outline-none focus:border-blue-500 transition">
+                                <p class="text-xs text-gray-500 mt-1">Example: if $1 equals ₦1,500, enter 1500.</p>
+                            </div>
+                            <button type="submit" name="save_currency_settings" class="bg-emerald-600 hover:bg-emerald-700 px-6 py-2 rounded-lg transition w-full md:w-auto">
+                                <i class="fas fa-save mr-2"></i> Save Currency
                             </button>
                         </form>
                     </div>

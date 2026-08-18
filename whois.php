@@ -1,4 +1,5 @@
 <?php
+ob_start();
 session_start();
 require_once 'lib/Auth.php';
 require_once 'config/database.php';
@@ -74,7 +75,13 @@ $canWhois   = ($userPlan !== 'free');
 // ── Handle AJAX WHOIS lookup ───────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
     header('Content-Type: application/json');
-    ob_start();
+    set_exception_handler(function (Throwable $e): void {
+        error_log('[whois] AJAX fatal: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        http_response_code(500);
+        echo json_encode(['success'=>false,'message'=>'Server error while running WHOIS lookup. Check the PHP error log for details.']);
+        exit();
+    });
 
     $input  = json_decode(file_get_contents('php://input'), true) ?? [];
     $action = $input['action'] ?? 'lookup';
@@ -151,32 +158,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
 
         // ── Save to whois_lookups ─────────────────────────
         $nsJson = json_encode($data['nameservers'] ?? []);
-        $insStmt = $conn->prepare("
-            INSERT INTO whois_lookups
-              (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
-               registrant_name, registrant_org, registrant_country, registrant_email,
-               created_date, updated_date, expiry_date, status, nameservers, dnssec,
-               is_available, raw_response, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ");
-        $insStmt->bind_param("sssssssssssssssssss",
-            // NOTE: bind_param first arg is types string, values follow
-            ...[
-                $session['user_id'], $domain, $tld, $creditCost,
-                $data['registrar'] ?? null, $data['registrar_url'] ?? null,
-                $data['registrant_name'] ?? null, $data['registrant_org'] ?? null,
-                $data['registrant_country'] ?? null, $data['registrant_email'] ?? null,
-                $data['created_date'] ?? null, $data['updated_date'] ?? null,
-                $data['expiry_date'] ?? null,
-                is_array($data['status'] ?? null) ? implode(' ', $data['status']) : ($data['status'] ?? null),
-                $nsJson, $data['dnssec'] ?? null,
-                (int)($data['is_available'] ?? 0),
-                $data['raw'] ?? null,
-                $data['source'] ?? 'api',
-            ]
-        );
-        // Rebuild with correct bind types
-        $insStmt->close();
         $insStmt2 = $conn->prepare("
             INSERT INTO whois_lookups
               (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
@@ -185,6 +166,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
                is_available, raw_response, source)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ");
+        if (!$insStmt2) {
+            error_log("[whois] insert prepare failed: " . $conn->error);
+            $conn->query("UPDATE users SET credits = credits + {$creditCost} WHERE id=" . (int)$session['user_id']);
+            ob_end_clean();
+            echo json_encode(['success'=>false,'message'=>'Lookup completed, but saving the result failed. Your credits were refunded.']);
+            exit();
+        }
         $isAvailInt = (int)($data['is_available'] ?? 0);
         $statusStr  = is_array($data['status'] ?? null)
         ? implode(' ', $data['status'])
@@ -204,7 +192,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
         $source             = $data['source'] ?? 'api';
 
         $insStmt2->bind_param(
-        "isssssssssssssssiss",
+        "ississssssssssssiss",
         $session['user_id'],
         $domain,
         $tld,
@@ -225,9 +213,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
         $rawResponse,
         $source
         );
-        $insStmt2->execute();
+        if (!$insStmt2->execute()) {
+            error_log("[whois] insert execute failed for {$domain}: " . $insStmt2->error);
+            $insStmt2->close();
+            $conn->query("UPDATE users SET credits = credits + {$creditCost} WHERE id=" . (int)$session['user_id']);
+            ob_end_clean();
+            echo json_encode(['success'=>false,'message'=>'Lookup completed, but saving the result failed. Your credits were refunded.']);
+            exit();
+        }
         $insStmt2->close();
-        echo "<script>console.log('test 1');</script>";
         // ── Credit ledger entry ───────────────────────────
         $balStmt = $conn->prepare("SELECT credits FROM users WHERE id=?");
         $balStmt->bind_param("i", $session['user_id']);
@@ -319,6 +313,8 @@ function whoisXmlApiLookup(string $domain, string $apiKey): ?array {
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 15,
         CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_PROXY          => '',
+        CURLOPT_NOPROXY        => '*',
         CURLOPT_USERAGENT      => 'checkdomain/2.0',
     ]);
     $body     = curl_exec($ch);
@@ -683,26 +679,10 @@ body::before{content:'';position:fixed;inset:0;
 
 <main class="main">
 
-  <!-- Topbar -->
-  <div class="topbar">
-    <div class="topbar-left">
-      <button class="mobile-menu-btn" onclick="openSidebar()"><i class="fas fa-bars"></i></button>
-      <div class="breadcrumb">
-        <a href="<?= htmlspecialchars($assetUrl('dashboard.php')) ?>">Dashboard</a>
-        <span style="color:var(--text3);font-size:9px;"><i class="fas fa-chevron-right"></i></span>
-        <span style="color:var(--text);">WHOIS Lookup</span>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <div class="credits-pill" id="creditsPill">
-        <i class="fas fa-bolt" style="color:var(--amber);font-size:11px;"></i>
-        <b id="creditsDisplay"><?= $credits ?></b> credits
-      </div>
-      <a href="<?= htmlspecialchars($assetUrl('billing.php?topup=1')) ?>" class="topbar-btn" title="Top up credits">
-        <i class="fas fa-plus"></i>
-      </a>
-    </div>
-  </div>
+  <?php
+    $cdHeaderTitle = 'WHOIS Lookup';
+    require 'includes/cd_header.php';
+  ?>
 
   <div class="content">
 
@@ -721,7 +701,7 @@ body::before{content:'';position:fixed;inset:0;
       <div class="gate-title">WHOIS requires a Pro plan</div>
       <div class="gate-sub">Upgrade to unlock deep WHOIS data — registrar, expiry date, nameservers, registrant details, and EPP status codes for any domain.</div>
       <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
+        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — $9/mo
       </a>
     </div>
     <?php endif; ?>
@@ -859,28 +839,29 @@ async function runLookup() {
 
   try {
     const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
+      method: 'POST',
+      headers: {
         'Content-Type': 'application/json',
         'X-Requested-With': 'XMLHttpRequest'
-    },
-    body: JSON.stringify({
+      },
+      body: JSON.stringify({
         action: 'lookup',
         domain: val
-    })
-});
+      })
+    });
 
-const text = await res.text();
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (err) {
+      console.error('Invalid WHOIS response:', text);
+      throw new Error(`Server returned invalid response (${res.status}).`);
+    }
 
-console.log('Response:', text);
-
-try {
-    const data = JSON.parse(text);
-    console.log(data);
-} catch (e) {
-    console.error('Invalid JSON:', text);
-}
-    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || `Request failed (${res.status}).`);
+    }
 
     hideLoading();
 
@@ -899,9 +880,10 @@ try {
     } else {
       showToast(data.message || 'Lookup failed. Try again.', 'error');
     }
-  } catch {
+  } catch (err) {
+    console.error('WHOIS lookup failed:', err);
     hideLoading();
-    showToast('Network error. Please try again.', 'error');
+    showToast(err?.message || 'Network error. Please try again.', 'error');
   } finally {
     btn.disabled  = false;
     btn.innerHTML = '<i class="fas fa-search" style="font-size:11px;"></i> Lookup';

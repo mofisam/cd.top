@@ -25,6 +25,7 @@
 $activePage    = $activePage    ?? 'dashboard';
 $watchlistCount = $watchlistCount ?? 0;
 $alertCount    = $alertCount    ?? 0;
+$user          = $user ?? [];
 
 // ── User meta ────────────────────────────────────────────────────────────────
 $sbUserName = trim($user['full_name'] ?? '') ?: explode('@', $user['email'] ?? 'U')[0];
@@ -38,7 +39,7 @@ $sbInitials = strtoupper(
 
 // plan / credits — gracefully absent until schema is extended
 $sbPlan    = $user['plan']    ?? 'free'; // free | pro | elite
-$sbCredits = $user['credits'] ?? 10;
+$sbCredits = (int)($user['credits'] ?? 0);
 
 $sbPlanLabel = match($sbPlan) {
     'pro'   => 'Pro plan',
@@ -50,12 +51,18 @@ $sbPlanCredits = match($sbPlan) {
     'elite' => 500,
     default => 10,
 };
-$sbCreditsPercent = min(100, (int) round(($sbCredits / $sbPlanCredits) * 100));
+$sbCreditsPercent = $sbPlanCredits > 0 ? min(100, (int) round(($sbCredits / $sbPlanCredits) * 100)) : 0;
 
 // ── URL helper ───────────────────────────────────────────────────────────────
 $appBasePath = $appBasePath ?? rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
 if (in_array($appBasePath, ['/', '.', '\\'])) { $appBasePath = ''; }
 $sbUrl = fn(string $p): string => ($appBasePath ?: '') . '/' . ltrim($p, '/');
+
+// $assetUrl may not be defined by the including page — fall back to $sbUrl so
+// this sidebar never fatals on an undefined variable/function call.
+if (!isset($assetUrl) || !is_callable($assetUrl)) {
+    $assetUrl = $sbUrl;
+}
 
 // ── Active helper ─────────────────────────────────────────────────────────────
 $isActive = fn(string $page): string => $activePage === $page ? 'active' : '';

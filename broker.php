@@ -124,8 +124,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
             ob_end_clean(); echo json_encode(['success'=>false,'message'=>'Enter a valid domain name.']); exit();
         }
 
-        $budgetNaira   = max(0, (int)($input['budget'] ?? 0));
-        $budgetKobo    = $budgetNaira * 100;
+        $budgetDollars   = max(0, (int)($input['budget'] ?? 0));
+        $budgetKobo    = $budgetDollars * 100;
         $budgetFlex    = !empty($input['budget_flexible']) ? 1 : 0;
         $purpose       = in_array($input['purpose'] ?? '', ['startup','rebrand','investment','portfolio','personal','other'])
                          ? $input['purpose'] : 'other';
@@ -303,8 +303,9 @@ $purposeLabels = [
     'other'     => '• Other',
 ];
 
-function koboToNaira(int $k): string {
-    return '₦' . number_format($k / 100, 0, '.', ',');
+function koboToDollars(int $k): string {
+    $amount = $k >= 100000 ? (int)round($k / 1000) : $k;
+    return '$' . number_format($amount / 100, 0, '.', ',');
 }
 function timeAgo(string $ts): string {
     $diff = time() - strtotime($ts);
@@ -642,7 +643,7 @@ body::before{content:'';position:fixed;inset:0;
       </div>
       <div class="eg-ctas">
         <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=elite')) ?>" class="eg-cta-primary">
-          <i class="fas fa-crown" style="font-size:10px;"></i> Upgrade to Elite — ₦29,000/mo
+          <i class="fas fa-crown" style="font-size:10px;"></i> Upgrade to Elite — $29/mo
         </a>
         <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="eg-cta-secondary">
           Start with Pro →
@@ -700,10 +701,10 @@ body::before{content:'';position:fixed;inset:0;
 
             <div class="form-group">
               <label class="form-label" for="brokerBudget">
-                Max budget (₦) <span>*</span>
+                Max budget ($) <span>*</span>
               </label>
               <div class="budget-row">
-                <span class="budget-symbol">₦</span>
+                <span class="budget-symbol">$</span>
                 <input class="form-input budget-input" type="number" id="brokerBudget"
                        placeholder="500,000" min="0" step="1000"
                        <?= !$canBroker ? 'disabled' : '' ?>>
@@ -860,7 +861,7 @@ body::before{content:'';position:fixed;inset:0;
               <div>
                 <div class="rcp-item-label">Your budget</div>
                 <div class="rcp-item-value">
-                  <?= koboToNaira($req['budget_kobo']) ?>
+                  <?= koboToDollars($req['budget_kobo']) ?>
                   <?php if ($req['budget_flexible']): ?>
                   <span style="font-size:9px;color:var(--text3);background:var(--bg4);padding:1px 5px;border-radius:3px;margin-left:4px;">Flexible</span>
                   <?php endif; ?>
@@ -869,13 +870,13 @@ body::before{content:'';position:fixed;inset:0;
               <div>
                 <div class="rcp-item-label">Agreed price</div>
                 <div class="rcp-item-value <?= $req['agreed_price_kobo'] ? '' : 'na' ?>">
-                  <?= $req['agreed_price_kobo'] ? koboToNaira((int)$req['agreed_price_kobo']) : 'Pending' ?>
+                  <?= $req['agreed_price_kobo'] ? koboToDollars((int)$req['agreed_price_kobo']) : 'Pending' ?>
                 </div>
               </div>
               <div>
                 <div class="rcp-item-label">Broker fee (15%)</div>
                 <div class="rcp-item-value <?= $req['broker_fee_kobo'] ? '' : 'na' ?>">
-                  <?= $req['broker_fee_kobo'] ? koboToNaira((int)$req['broker_fee_kobo']) : 'On success' ?>
+                  <?= $req['broker_fee_kobo'] ? koboToDollars((int)$req['broker_fee_kobo']) : 'On success' ?>
                 </div>
               </div>
             </div>

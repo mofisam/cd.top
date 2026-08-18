@@ -94,7 +94,7 @@ class Auth {
     }
     
     // Social login/register
-    public function socialLogin($provider, $providerId, $email, $name, $avatar = null, $ip, $userAgent) {
+    public function socialLogin($provider, $providerId, $email, $name, $ip, $userAgent, $avatar = null) {
         // Check if user exists
         $stmt = $this->conn->prepare("SELECT id, email, full_name, role FROM users WHERE provider = ? AND provider_id = ?");
         $stmt->bind_param("ss", $provider, $providerId);
@@ -155,6 +155,8 @@ class Auth {
     
     // Verify session
     public function verifySession($sessionToken) {
+        expireExpiredSubscriptions($this->conn);
+
         $stmt = $this->conn->prepare("SELECT s.*, u.id as user_id, u.email, u.full_name, u.role, u.status FROM user_sessions s JOIN users u ON s.user_id = u.id WHERE s.session_token = ? AND s.is_active = 1 AND s.expires_at > NOW() AND u.status = 'active'");
         $stmt->bind_param("s", $sessionToken);
         $stmt->execute();
@@ -255,7 +257,12 @@ class Auth {
     
     // Get user by ID
     public function getUserById($id) {
-        $stmt = $this->conn->prepare("SELECT id, email, full_name, avatar, role, created_at, last_login FROM users WHERE id = ?");
+        $stmt = $this->conn->prepare("
+            SELECT id, email, full_name, avatar, role, status, plan, credits, credits_reserved,
+                   billing_email, billing_name, billing_phone, created_at, last_login
+            FROM users
+            WHERE id = ?
+        ");
         $stmt->bind_param("i", $id);
         $stmt->execute();
         return $stmt->get_result()->fetch_assoc();

@@ -454,7 +454,7 @@ body::before{content:'';position:fixed;inset:0;
         Upgrade to Pro to receive real-time alerts when your watched domains become available, expire, or go offline. Free users can still add domains to their watchlist.
       </div>
       <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
+        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — $9/mo
       </a>
     </div>
     <?php endif; ?>

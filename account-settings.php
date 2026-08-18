@@ -907,7 +907,7 @@ body::before {
               <?php
               $planIcon  = match($userPlan) { 'pro' => 'fa-bolt', 'elite' => 'fa-crown', default => 'fa-user' };
               $planColor = match($userPlan) { 'pro' => 'pi-pro', 'elite' => 'pi-elite', default => 'pi-free' };
-              $planPrice = match($userPlan) { 'pro' => '₦9,000/mo', 'elite' => '₦29,000/mo', default => 'Free' };
+              $planPrice = match($userPlan) { 'pro' => '$9/mo', 'elite' => '$29/mo', default => 'Free' };
               $planCredit= match($userPlan) { 'pro' => 100, 'elite' => 500, default => 10 };
               $creditPct = min(100, round(($credits / $planCredit) * 100));
               $creditBar = $creditPct > 50 ? 'var(--green)' : ($creditPct > 20 ? 'var(--amber)' : 'var(--coral)');

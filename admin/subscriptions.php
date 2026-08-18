@@ -7,7 +7,8 @@ $conn       = getDBConnection();
 $activePage = 'subscriptions';
 
 // ── Helpers ────────────────────────────────────────────────
-$kobo2Naira = fn(int $k): string => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo2Dollars = fn(int $k): string => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 
 // ── Handle POST actions ─────────────────────────────────────
 $flash = null;
@@ -387,6 +388,9 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       <a href="?export=1" class="btn-secondary flex items-center gap-2 text-sm">
         <i class="fas fa-download text-xs"></i> Export CSV
       </a>
+      <a href="plan" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg transition flex items-center justify-center gap-2 export-btn">
+         Manage plan
+     </a>
       <button onclick="openModal('createModal')" class="btn-primary flex items-center gap-2 text-sm">
         <i class="fas fa-plus text-xs"></i> Manual subscription
       </button>
@@ -403,7 +407,7 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       ['val'=>$statPastDue,  'lbl'=>'Past due',     'icon'=>'fa-exclamation-triangle','color'=>'amber'],
       ['val'=>$statCanceled, 'lbl'=>'Canceled',     'icon'=>'fa-times-circle',    'color'=>'red'],
       ['val'=>$statRenewing, 'lbl'=>'Due in 7d',    'icon'=>'fa-calendar-alt',    'color'=>'purple'],
-      ['val'=>$kobo2Naira($statMRR), 'lbl'=>'Est. MRR', 'icon'=>'fa-naira-sign', 'color'=>'green', 'raw'=>true],
+      ['val'=>$kobo2Dollars($statMRR), 'lbl'=>'Est. MRR', 'icon'=>'fa-dollar-sign', 'color'=>'green', 'raw'=>true],
     ];
     $cmap = ['blue'=>['bg'=>'bg-blue-500/20','txt'=>'text-blue-400'],'green'=>['bg'=>'bg-green-500/20','txt'=>'text-green-400'],'amber'=>['bg'=>'bg-amber-500/20','txt'=>'text-amber-400'],'red'=>['bg'=>'bg-red-500/20','txt'=>'text-red-400'],'purple'=>['bg'=>'bg-purple-500/20','txt'=>'text-purple-400']];
     foreach ($cards as $c):
@@ -568,7 +572,7 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
                 <?= htmlspecialchars($sub['plan_name']) ?>
               </span>
               <?php if ($priceKobo > 0): ?>
-              <div class="text-gray-500 text-xs mt-1"><?= $kobo2Naira($priceKobo) ?>/<?= $sub['billing_cycle']==='yearly'?'yr':'mo' ?></div>
+              <div class="text-gray-500 text-xs mt-1"><?= $kobo2Dollars($priceKobo) ?>/<?= $sub['billing_cycle']==='yearly'?'yr':'mo' ?></div>
               <?php endif; ?>
             </td>
 
@@ -780,8 +784,8 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       <div>
         <label class="text-xs text-gray-400 mb-1 block">New plan</label>
         <select class="inp" name="new_plan" id="cp-plan">
-          <option value="pro">Pro — ₦9,000/mo</option>
-          <option value="elite">Elite — ₦29,000/mo</option>
+          <option value="pro">Pro — $9/mo</option>
+          <option value="elite">Elite — $29/mo</option>
         </select>
       </div>
       <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-amber-300 text-xs">

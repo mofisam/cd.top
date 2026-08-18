@@ -306,9 +306,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $dup->close();
 
             $upd = $conn->prepare("UPDATE email_templates SET slug=?,name=?,description=?,subject=?,html_body=?,text_body=?,is_active=?,last_edited_by=?,updated_at=NOW() WHERE id=?");
-            $upd->bind_param("ssssssiisi", $slug,$name,$description,$subject,$htmlBody,$textBody,$isActive,$adminUser['id'],$tId);
-            // note: bind types correct for 9 params
-            $upd = $conn->prepare("UPDATE email_templates SET slug=?,name=?,description=?,subject=?,html_body=?,text_body=?,is_active=?,last_edited_by=?,updated_at=NOW() WHERE id=?");
             $upd->bind_param("ssssssiii", $slug,$name,$description,$subject,$htmlBody,$textBody,$isActive,$adminUser['id'],$tId);
             $upd->execute(); $upd->close();
             logAdminActivity($adminUser['id'], 'EDIT_EMAIL_TEMPLATE', "Edited template: $slug");
@@ -374,7 +371,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             '{{email}}'            => $testEmail,
             '{{domain_name}}'      => 'mybrand.ng',
             '{{plan_name}}'        => 'Pro plan',
-            '{{amount}}'           => '₦9,000',
+            '{{amount}}'           => '$9',
             '{{billing_date}}'     => date('M j, Y'),
             '{{next_billing_date}}'=> date('M j, Y', strtotime('+1 month')),
             '{{invoice_number}}'   => 'INV-'.date('Y').'-000042',
@@ -428,7 +425,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'preview') {
     $tStmt->close();
     $conn->close();
 
-    $vars = ['{{first_name}}'=>'Samuel','{{email}}'=>'user@example.com','{{domain_name}}'=>'mybrand.ng','{{plan_name}}'=>'Pro plan','{{amount}}'=>'₦9,000','{{billing_date}}'=>date('M j, Y'),'{{next_billing_date}}'=>date('M j, Y',strtotime('+1 month')),'{{invoice_number}}'=>'INV-2025-000042','{{days_left}}'=>'14','{{expiry_date}}'=>date('M j, Y',strtotime('+14 days')),'{{status_label}}'=>'Negotiating','{{update_message}}'=>'We have made contact with the domain owner.','{{expiry_minutes}}'=>'60','{{reset_url}}'=>'#','{{dashboard_url}}'=>'#','{{register_url}}'=>'#','{{backorder_url}}'=>'#','{{whois_url}}'=>'#','{{billing_url}}'=>'#','{{watchlist_url}}'=>'#','{{broker_url}}'=>'#','{{site_name}}'=>'CheckDomain','{{site_url}}'=>'https://checkdomain.ng'];
+    $vars = ['{{first_name}}'=>'Samuel','{{email}}'=>'user@example.com','{{domain_name}}'=>'mybrand.ng','{{plan_name}}'=>'Pro plan','{{amount}}'=>'$9','{{billing_date}}'=>date('M j, Y'),'{{next_billing_date}}'=>date('M j, Y',strtotime('+1 month')),'{{invoice_number}}'=>'INV-2025-000042','{{days_left}}'=>'14','{{expiry_date}}'=>date('M j, Y',strtotime('+14 days')),'{{status_label}}'=>'Negotiating','{{update_message}}'=>'We have made contact with the domain owner.','{{expiry_minutes}}'=>'60','{{reset_url}}'=>'#','{{dashboard_url}}'=>'#','{{register_url}}'=>'#','{{backorder_url}}'=>'#','{{whois_url}}'=>'#','{{billing_url}}'=>'#','{{watchlist_url}}'=>'#','{{broker_url}}'=>'#','{{site_name}}'=>'CheckDomain','{{site_url}}'=>'https://checkdomain.ng'];
     echo str_replace(array_keys($vars), array_values($vars), $html);
     exit();
 }
@@ -986,7 +983,7 @@ function previewFromEditor() {
   const html = document.getElementById('ef-html')?.value || '';
   const sampleVars = {
     '{{first_name}}':'Samuel','{{email}}':'user@example.com','{{domain_name}}':'mybrand.ng',
-    '{{plan_name}}':'Pro plan','{{amount}}':'₦9,000','{{billing_date}}':new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}),
+    '{{plan_name}}':'Pro plan','{{amount}}':'$9','{{billing_date}}':new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}),
     '{{next_billing_date}}':new Date(Date.now()+2592000000).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}),
     '{{invoice_number}}':'INV-2025-000042','{{days_left}}':'14','{{expiry_date}}':'Aug 1, 2025',
     '{{status_label}}':'Negotiating','{{update_message}}':'We have contacted the owner.','{{expiry_minutes}}':'60',

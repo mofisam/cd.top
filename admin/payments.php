@@ -7,7 +7,8 @@ $conn       = getDBConnection();
 $activePage = 'payments';
 
 // ── Helpers ────────────────────────────────────────────────
-$kobo = fn(int $k): string => '₦' . number_format($k / 100, 0, '.', ',');
+$usdMinorAmount = fn(int $amount): int => $amount >= 100000 ? (int)round($amount / 1000) : $amount;
+$kobo = fn(int $k): string => '$' . number_format($usdMinorAmount($k) / 100, 0, '.', ',');
 
 // ── Handle POST actions ─────────────────────────────────────
 $flash = null;
@@ -151,7 +152,7 @@ if (isset($_GET['export'])) {
     header('Content-Type: text/csv');
     header('Content-Disposition: attachment; filename="payments_'.date('Y-m-d').'.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['ID','User ID','Email','Type','Amount (₦)','Discount (₦)','Charged (₦)','Refunded (₦)','Currency','Status','Channel','Reference','Transaction ID','Gateway Response','Promo Code','Paid At','Created']);
+    fputcsv($out, ['ID','User ID','Email','Type','Amount ($)','Discount ($)','Charged ($)','Refunded ($)','Currency','Status','Channel','Reference','Transaction ID','Gateway Response','Promo Code','Paid At','Created']);
     $rs = $conn->query("
         SELECT p.id, p.user_id, u.email, p.type,
                p.amount_kobo/100, p.discount_kobo/100, p.amount_charged_kobo/100, p.amount_refunded_kobo/100,
@@ -749,10 +750,10 @@ body{background:#0F172A;font-family:'Inter',sans-serif;overflow-x:hidden;color:#
       <input type="hidden" name="pay_id" id="rf-id">
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="text-xs text-gray-400 mb-1 block">Refund amount (₦) <span class="text-red-400">*</span></label>
+          <label class="text-xs text-gray-400 mb-1 block">Refund amount ($) <span class="text-red-400">*</span></label>
           <input class="inp" type="number" name="refund_amount" id="rf-amount"
                  min="0.01" step="0.01" placeholder="e.g. 9000" required>
-          <p class="text-xs text-gray-500 mt-1">Enter in Naira (₦), not kobo.</p>
+          <p class="text-xs text-gray-500 mt-1">Enter in Dollars ($), not kobo.</p>
         </div>
         <div>
           <label class="text-xs text-gray-400 mb-1 block">Reason</label>
@@ -847,18 +848,19 @@ document.querySelectorAll('.modal-backdrop').forEach(m => {
 // ── Detail modal ──────────────────────────────────────────
 function openDetailModal(p) {
   const fmt = d => d ? new Date(d).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
-  const koboToNgn = k => '₦' + Number(k/100).toLocaleString('en-NG',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const usdMinorAmount = amount => amount >= 100000 ? Math.round(amount / 1000) : amount;
+  const centsToUsd = k => '$' + Number(usdMinorAmount(k)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
   const fields = [
     {l:'Payment ID',       v:'#'+p.id},
     {l:'User',             v:'#'+p.user_id+' · '+esc(p.email)},
     {l:'Type',             v:esc(p.type)},
     {l:'Status',           v:esc(p.status)},
-    {l:'Amount',           v:koboToNgn(p.amount_kobo||0)},
-    {l:'Discount',         v:p.discount_kobo>0?koboToNgn(p.discount_kobo):'—'},
-    {l:'Charged',          v:koboToNgn(p.amount_charged_kobo||0)},
-    {l:'Refunded',         v:p.amount_refunded_kobo>0?koboToNgn(p.amount_refunded_kobo):'—'},
-    {l:'Paystack fees',    v:p.fees_kobo>0?koboToNgn(p.fees_kobo):'—'},
+    {l:'Amount',           v:centsToUsd(p.amount_kobo||0)},
+    {l:'Discount',         v:p.discount_kobo>0?centsToUsd(p.discount_kobo):'—'},
+    {l:'Charged',          v:centsToUsd(p.amount_charged_kobo||0)},
+    {l:'Refunded',         v:p.amount_refunded_kobo>0?centsToUsd(p.amount_refunded_kobo):'—'},
+    {l:'Paystack fees',    v:p.fees_kobo>0?centsToUsd(p.fees_kobo):'—'},
     {l:'Channel',          v:esc(p.channel||'—')},
     {l:'Gateway resp',     v:esc(p.gateway_response||'—')},
     {l:'Failure code',     v:esc(p.failure_code||'—')},
@@ -898,7 +900,7 @@ function openRefundModal(id, email, refundableKobo, type) {
   document.getElementById('rf-id').value         = id;
   document.getElementById('rf-payid').textContent = '#' + id;
   document.getElementById('rf-email').textContent = email;
-  document.getElementById('rf-max').textContent   = '₦' + (refundableKobo/100).toLocaleString('en-NG');
+  document.getElementById('rf-max').textContent   = '$' + (refundableKobo/100).toLocaleString('en-NG');
   document.getElementById('rf-amount').max        = (refundableKobo/100).toFixed(2);
   document.getElementById('rf-amount').value      = (refundableKobo/100).toFixed(2);
   // Only show credits row for credit top-ups

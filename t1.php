@@ -151,32 +151,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_SERVER['HTTP_X_REQUESTED_W
 
         // ── Save to whois_lookups ─────────────────────────
         $nsJson = json_encode($data['nameservers'] ?? []);
-        $insStmt = $conn->prepare("
-            INSERT INTO whois_lookups
-              (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
-               registrant_name, registrant_org, registrant_country, registrant_email,
-               created_date, updated_date, expiry_date, status, nameservers, dnssec,
-               is_available, raw_response, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ");
-        $insStmt->bind_param("sssssssssssssssssss",
-            // NOTE: bind_param first arg is types string, values follow
-            ...[
-                $session['user_id'], $domain, $tld, $creditCost,
-                $data['registrar'] ?? null, $data['registrar_url'] ?? null,
-                $data['registrant_name'] ?? null, $data['registrant_org'] ?? null,
-                $data['registrant_country'] ?? null, $data['registrant_email'] ?? null,
-                $data['created_date'] ?? null, $data['updated_date'] ?? null,
-                $data['expiry_date'] ?? null,
-                is_array($data['status'] ?? null) ? implode(' ', $data['status']) : ($data['status'] ?? null),
-                $nsJson, $data['dnssec'] ?? null,
-                (int)($data['is_available'] ?? 0),
-                $data['raw'] ?? null,
-                $data['source'] ?? 'api',
-            ]
-        );
-        // Rebuild with correct bind types
-        $insStmt->close();
         $insStmt2 = $conn->prepare("
             INSERT INTO whois_lookups
               (user_id, domain_name, tld, credits_spent, registrar, registrar_url,
@@ -693,7 +667,7 @@ body::before{content:'';position:fixed;inset:0;
       <div class="gate-title">WHOIS requires a Pro plan</div>
       <div class="gate-sub">Upgrade to unlock deep WHOIS data — registrar, expiry date, nameservers, registrant details, and EPP status codes for any domain.</div>
       <a href="<?= htmlspecialchars($assetUrl('billing.php?plan=pro')) ?>" class="gate-cta">
-        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — ₦9,000/mo
+        <i class="fas fa-bolt" style="font-size:10px;"></i> Upgrade to Pro — $9/mo
       </a>
     </div>
     <?php endif; ?>
